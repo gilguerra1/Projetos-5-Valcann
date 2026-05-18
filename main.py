@@ -53,8 +53,8 @@ def buscar_epics():
         "Content-Type": "application/json",
     }
     payload = json.dumps({
-        "jql": "issuetype = Epic AND statusCategory != Done",
-        "fields": ["summary", "status", "assignee", "priority"],
+        "jql": "updated >= -48h order by updated DESC",
+        "fields": ["summary", "status", "assignee", "priority", "updated"],
         "maxResults": 50,
     })
 
@@ -99,6 +99,7 @@ with st.spinner("Buscando dados no Jira..."):
                     "Status": fields.get("status", {}).get("name", "—"),
                     "Responsável": assignee.get("displayName", "Não atribuído"),
                     "Prioridade": priority.get("name", "—"),
+                    "Atualizado em": fields.get("updated", "—"),
                 })
 
             # st.dataframe exibe uma tabela interativa com filtros e ordenação
