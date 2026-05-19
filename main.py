@@ -24,8 +24,8 @@ def buscar_epics():
     auth = requests.auth.HTTPBasicAuth(os.getenv("EMAIL"), os.getenv("API_TOKEN"))
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     payload = json.dumps({
-        "jql": "issuetype = Epic AND statusCategory != Done",
-        "fields": ["summary", "status", "assignee", "priority"],
+        "jql": "updated >= -48h order by updated DESC",
+        "fields": ["summary", "status", "assignee", "priority", "updated"],
         "maxResults": 50,
     })
     response = requests.post(url, data=payload, auth=auth, headers=headers)
