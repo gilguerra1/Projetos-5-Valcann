@@ -1,0 +1,772 @@
+# ============================================================
+# VALCANN — Ferramentas Jira | Projetos 5
+# ============================================================
+# Arquivo unificado com todas as funcionalidades:
+#   1. jira_api()              — testa conexão e lista Epics
+#   2. contador_atualizadas_48h() — tickets atualizados (48h)
+#   3. contador_flagged()      — tarefas com impedimento
+#   4. porcentagem_projetos()  — % de progresso por projeto
+#   5. dashboard()             — dashboard Streamlit
+#
+# USO (CLI):
+#   python valcann.py [jira_api|48h|flagged|progresso]
+#
+# USO (Dashboard):
+#   streamlit run valcann.py
+#
+# PRÉ-REQUISITO:
+#   Arquivo .env na raiz com EMAIL e API_TOKEN preenchidos.
+# ============================================================
+
+import json
+import os
+import sys
+from datetime import date, datetime, timedelta
+
+import requests
+import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ------------------------------------------------------------
+# CONFIGURAÇÃO COMPARTILHADA
+# ------------------------------------------------------------
+DOMAIN  = "cesar-projetos4"
+URL     = f"https://{DOMAIN}.atlassian.net/rest/api/3/search/jql"
+AUTH    = requests.auth.HTTPBasicAuth(os.getenv("EMAIL"), os.getenv("API_TOKEN"))
+HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+}
+
+# Mapeamento de categoria de status → rótulo legível
+# Usa o campo 'key' (sempre em inglês/padronizado), não o 'name' (localizado)
+CATEGORIAS = {
+    "todo":          "A Fazer",
+    "indeterminate": "Em Andamento",
+    "done":          "Concluído",
+    "undefined":     "A Fazer",
+}
+
+
+# ── 1. JIRA API ───────────────────────────────────────────────
+def jira_api():
+    """Testa a conexão com o Jira e lista Epics em aberto."""
+    payload = json.dumps({
+        "jql": "issuetype = Epic AND statusCategory != Done",
+        "fields": ["summary", "status", "assignee", "priority"],
+        "maxResults": 50,
+    })
+    response = requests.post(URL, data=payload, auth=AUTH, headers=HEADERS)
+    response.raise_for_status()
+    dados  = response.json()
+    issues = dados.get("results", []) or dados.get("issues", [])
+    print(f"Sucesso! Projetos encontrados: {len(issues)}")
+    for item in issues:
+        fields = item.get("fields", {})
+        print(
+            f"Projeto: {fields.get('summary')} | "
+            f"Status: {fields.get('status', {}).get('name', '—')}"
+        )
+
+
+# ── 2. CONTADOR DE TICKETS ATUALIZADOS NAS ÚLTIMAS 48H ───────
+def contador_atualizadas_48h():
+    """Busca e exibe todas as issues atualizadas nas últimas 48 horas."""
+    payload = json.dumps({
+        "jql": "updated >= -48h ORDER BY updated DESC",
+        "fields": ["summary", "status", "assignee", "priority",
+                   "issuetype", "project", "updated"],
+        "maxResults": 100,
+    })
+    response = requests.post(URL, data=payload, auth=AUTH, headers=HEADERS)
+    response.raise_for_status()
+    dados      = response.json()
+    issues_raw = dados.get("results") or dados.get("issues", [])
+    issues     = [item.get("issue", item) for item in issues_raw]
+
+    total = len(issues)
+    print("=" * 60)
+    print("  CONTADOR DE TICKETS ATUALIZADOS NAS ÚLTIMAS 48 HORAS")
+    print(f"  Total de issues encontradas: {total}")
+    print("=" * 60)
+
+    if total == 0:
+        print("  Nenhuma issue atualizada nas últimas 48 horas.")
+        return
+
+    for i, issue in enumerate(issues, start=1):
+        fields      = issue.get("fields", {})
+        chave       = issue.get("key", "—")
+        resumo      = fields.get("summary", "Sem título")
+        status      = fields.get("status", {}).get("name", "—")
+        projeto     = fields.get("project", {}).get("name", "—")
+        tipo        = fields.get("issuetype", {}).get("name", "—")
+        responsavel = (fields.get("assignee") or {}).get("displayName", "Não atribuído")
+        prioridade  = (fields.get("priority") or {}).get("name", "—")
+        atualizado  = fields.get("updated", "—")
+
+        print(f"\n  [{i:02d}] {chave} — {resumo}")
+        print(f"       Projeto    : {projeto}")
+        print(f"       Tipo       : {tipo}")
+        print(f"       Status     : {status}")
+        print(f"       Responsável: {responsavel}")
+        print(f"       Prioridade : {prioridade}")
+        print(f"       Atualizado : {atualizado}")
+
+    print("\n" + "=" * 60)
+    print(f"  Resumo: {total} issue(s) atualizada(s) nas últimas 48 horas.")
+    print("=" * 60)
+
+
+# ── 3. CONTADOR DE TAREFAS FLAGGED ───────────────────────────
+def contador_flagged():
+    """Busca e exibe todas as issues marcadas com impedimento (Flagged)."""
+    payload = json.dumps({
+        "jql": "cf[10021] = Impediment ORDER BY created DESC",
+        "fields": ["summary", "status", "assignee", "priority",
+                   "issuetype", "project", "customfield_10021"],
+        "maxResults": 100,
+    })
+    response = requests.post(URL, data=payload, auth=AUTH, headers=HEADERS)
+    response.raise_for_status()
+    dados      = response.json()
+    issues_raw = dados.get("results") or dados.get("issues", [])
+    issues     = [item.get("issue", item) for item in issues_raw]
+
+    total = len(issues)
+    print("=" * 60)
+    print("  CONTADOR DE TAREFAS FLAGGED")
+    print(f"  Total de impedimentos encontrados: {total}")
+    print("=" * 60)
+
+    if total == 0:
+        print("  Nenhuma tarefa flagged no momento.")
+        return
+
+    for i, issue in enumerate(issues, start=1):
+        fields      = issue.get("fields", {})
+        chave       = issue.get("key", "—")
+        resumo      = fields.get("summary", "Sem título")
+        status      = fields.get("status", {}).get("name", "—")
+        projeto     = fields.get("project", {}).get("name", "—")
+        tipo        = fields.get("issuetype", {}).get("name", "—")
+        responsavel = (fields.get("assignee") or {}).get("displayName", "Não atribuído")
+        prioridade  = (fields.get("priority") or {}).get("name", "—")
+        flag_raw    = fields.get("customfield_10021") or []
+        flag_label  = flag_raw[0].get("value", "Impediment") if flag_raw else "Impediment"
+
+        print(f"\n  [{i:02d}] {chave} — {resumo}")
+        print(f"       Projeto    : {projeto}")
+        print(f"       Tipo       : {tipo}")
+        print(f"       Status     : {status}")
+        print(f"       Responsável: {responsavel}")
+        print(f"       Prioridade : {prioridade}")
+        print(f"       Flag       : {flag_label}")
+
+    print("\n" + "=" * 60)
+    print(f"  Resumo: {total} tarefa(s) com impedimento ativo.")
+    print("=" * 60)
+
+
+# ── 4. PORCENTAGEM DE PROGRESSO POR PROJETO ──────────────────
+def porcentagem_projetos():
+    """Busca todas as issues e exibe o percentual de progresso por projeto."""
+
+    def _buscar_todas():
+        todas           = []
+        next_page_token = None
+        while True:
+            body = {
+                "jql": 'statusCategory in ("To Do", "In Progress", "Done") ORDER BY project ASC',
+                "fields": ["summary", "status", "project", "issuetype"],
+                "maxResults": 100,
+            }
+            if next_page_token:
+                body["nextPageToken"] = next_page_token
+            response = requests.post(URL, data=json.dumps(body), auth=AUTH, headers=HEADERS)
+            response.raise_for_status()
+            dados = response.json()
+            raw   = dados.get("results") or dados.get("issues", [])
+            todas.extend([item.get("issue", item) for item in raw])
+            next_page_token = dados.get("nextPageToken")
+            if not next_page_token:
+                break
+        return todas
+
+    def _barra(pct, largura=20):
+        preenchido = int(largura * pct / 100)
+        return "[" + "█" * preenchido + "░" * (largura - preenchido) + "]"
+
+    issues   = _buscar_todas()
+    projetos = {}
+
+    for issue in issues:
+        fields  = issue.get("fields", {})
+        projeto = fields.get("project", {}).get("name", "Desconhecido")
+        cat_raw = fields.get("status", {}).get("statusCategory", {}).get("key", "todo")
+        cat     = CATEGORIAS.get(cat_raw, "A Fazer")
+        if projeto not in projetos:
+            projetos[projeto] = {"A Fazer": 0, "Em Andamento": 0, "Concluído": 0}
+        projetos[projeto][cat] = projetos[projeto].get(cat, 0) + 1
+
+    total_geral     = 0
+    concluido_geral = 0
+
+    print("=" * 65)
+    print("  PORCENTAGEM DE PROGRESSO — TODOS OS PROJETOS")
+    print("=" * 65)
+
+    for nome, contagens in sorted(projetos.items()):
+        a_fazer      = contagens.get("A Fazer", 0)
+        em_andamento = contagens.get("Em Andamento", 0)
+        concluido    = contagens.get("Concluído", 0)
+        total        = a_fazer + em_andamento + concluido
+
+        total_geral     += total
+        concluido_geral += concluido
+
+        pct_done = (concluido / total * 100) if total else 0
+        print(f"\n  Projeto : {nome}")
+        print(f"  Total   : {total} issue(s)  |  "
+              f"A Fazer: {a_fazer}  |  "
+              f"Em Andamento: {em_andamento}  |  "
+              f"Concluído: {concluido}")
+        print(f"  Progresso: {_barra(pct_done)} {pct_done:.1f}%")
+
+    pct_geral = (concluido_geral / total_geral * 100) if total_geral else 0
+    print("\n" + "=" * 65)
+    print("  RESUMO GERAL")
+    print(f"  Total de issues : {total_geral}")
+    print(f"  Concluídas      : {concluido_geral}")
+    print(f"  Progresso geral : {_barra(pct_geral)} {pct_geral:.1f}%")
+    print("=" * 65)
+
+
+# ── 5. DASHBOARD STREAMLIT ────────────────────────────────────
+
+# --- Funções de busca com cache (usadas pelo dashboard) ---
+
+@st.cache_data(ttl=300)
+def _buscar_atualizadas_48h():
+    payload = json.dumps({
+        "jql": "updated >= -48h ORDER BY updated DESC",
+        "fields": ["summary", "status", "assignee", "priority",
+                   "issuetype", "project", "updated"],
+        "maxResults": 100,
+    })
+    response = requests.post(URL, data=payload, auth=AUTH, headers=HEADERS, timeout=15)
+    response.raise_for_status()
+    dados      = response.json()
+    issues_raw = dados.get("results") or dados.get("issues", [])
+    return [item.get("issue", item) for item in issues_raw]
+
+
+@st.cache_data(ttl=300)
+def _buscar_flagged_dash():
+    payload = json.dumps({
+        "jql": "cf[10021] = Impediment ORDER BY created DESC",
+        "fields": ["summary", "status", "assignee", "priority",
+                   "issuetype", "project", "customfield_10021"],
+        "maxResults": 100,
+    })
+    response = requests.post(URL, data=payload, auth=AUTH, headers=HEADERS, timeout=15)
+    response.raise_for_status()
+    dados      = response.json()
+    issues_raw = dados.get("results") or dados.get("issues", [])
+    return [item.get("issue", item) for item in issues_raw]
+
+
+@st.cache_data(ttl=600)
+def _buscar_progresso_dash():
+    todas           = []
+    next_page_token = None
+    while True:
+        body = {
+            "jql": 'statusCategory in ("To Do", "In Progress", "Done") ORDER BY project ASC',
+            "fields": ["summary", "status", "project"],
+            "maxResults": 100,
+        }
+        if next_page_token:
+            body["nextPageToken"] = next_page_token
+        response = requests.post(URL, data=json.dumps(body), auth=AUTH, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        dados = response.json()
+        raw   = dados.get("results") or dados.get("issues", [])
+        todas.extend([item.get("issue", item) for item in raw])
+        next_page_token = dados.get("nextPageToken")
+        if not next_page_token:
+            break
+    return todas
+
+
+@st.cache_data(ttl=300)
+def _buscar_vencendo_em_breve():
+    hoje   = date.today()
+    limite = hoje + timedelta(days=5)
+    jql    = (
+        f'statusCategory != Done '
+        f'AND duedate >= "{hoje.isoformat()}" '
+        f'AND duedate <= "{limite.isoformat()}" '
+        f'ORDER BY duedate ASC'
+    )
+    payload = json.dumps({
+        "jql": jql,
+        "fields": ["summary", "status", "assignee", "priority", "duedate", "issuetype"],
+        "maxResults": 50,
+    })
+    response = requests.post(URL, data=payload, auth=AUTH, headers=HEADERS, timeout=15)
+    response.raise_for_status()
+    dados  = response.json()
+    issues = dados.get("results") or dados.get("issues", [])
+    return [item.get("issue", item) for item in issues]
+
+
+# --- Helpers visuais ---
+
+def _dias_restantes(duedate_str: str) -> int:
+    return (date.fromisoformat(duedate_str) - date.today()).days
+
+
+def _cor_prioridade(p: str) -> str:
+    return {
+        "Highest": "#BF2600", "High": "#FF5630",
+        "Medium":  "#FF991F", "Low":  "#00B8D9", "Lowest": "#6554C0",
+    }.get(p, "#42526E")
+
+
+def _cor_status(s: str) -> str:
+    sl = s.lower()
+    if any(x in sl for x in ("done", "conclu", "closed", "resolved")):
+        return "#00875A"
+    if any(x in sl for x in ("progress", "andamento", "review", "doing", "testing")):
+        return "#0052CC"
+    return "#42526E"
+
+
+def _badge(texto: str, bg: str, fg: str = "white") -> str:
+    return (
+        f'<span style="background:{bg};color:{fg};padding:2px 10px;'
+        f'border-radius:12px;font-size:0.75rem;font-weight:600;'
+        f'margin-right:4px;display:inline-block">{texto}</span>'
+    )
+
+
+def _card_issue(issue: dict, show_flag: bool = False) -> str:
+    fields      = issue.get("fields", {})
+    chave       = issue.get("key", "—")
+    resumo      = fields.get("summary", "Sem título")
+    status_name = fields.get("status", {}).get("name", "—")
+    projeto     = fields.get("project", {}).get("name", "—")
+    tipo        = fields.get("issuetype", {}).get("name", "—")
+    responsavel = (fields.get("assignee") or {}).get("displayName", "Não atribuído")
+    prioridade  = (fields.get("priority") or {}).get("name", "—")
+    atualizado  = fields.get("updated", "")
+    duedate     = fields.get("duedate", "")
+
+    if atualizado:
+        try:
+            dt             = datetime.fromisoformat(atualizado.replace("Z", "+00:00"))
+            atualizado_fmt = dt.strftime("%d/%m/%Y %H:%M")
+        except Exception:
+            atualizado_fmt = atualizado[:10]
+    else:
+        atualizado_fmt = "—"
+
+    cor_p      = _cor_prioridade(prioridade)
+    cor_s      = _cor_status(status_name)
+    flag_badge = ""
+
+    if show_flag:
+        flag_raw   = fields.get("customfield_10021") or []
+        flag_label = flag_raw[0].get("value", "Impediment") if flag_raw else "Impediment"
+        flag_badge = _badge(f"⚑ {flag_label}", "#FFEBE6", "#BF2600")
+
+    due_info = ""
+    if duedate:
+        dias    = _dias_restantes(duedate)
+        cor_due = "#BF2600" if dias <= 0 else "#FF5630" if dias <= 1 else "#FF991F" if dias <= 3 else "#006644"
+        due_info = (
+            f'<span style="color:{cor_due};font-size:0.8rem">'
+            f'📅 {date.fromisoformat(duedate).strftime("%d/%m/%Y")} ({dias}d)</span> &nbsp;'
+        )
+
+    return (
+        f'<div style="background:#fff;border-radius:8px;padding:12px 16px;margin-bottom:10px;'
+        f'border-left:4px solid {cor_s};box-shadow:0 1px 6px rgba(0,0,0,0.07)">'
+        f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">'
+        f'<div>'
+        f'<a href="https://cesar-projetos4.atlassian.net/browse/{chave}" target="_blank" '
+        f'style="font-weight:700;color:#0052CC;text-decoration:none;font-size:0.9rem">{chave}</a>&nbsp;'
+        f'{_badge(status_name, cor_s)}{_badge(prioridade, cor_p)}{flag_badge}'
+        f'</div>'
+        f'<span style="font-size:0.75rem;color:#6B778C">🕒 {atualizado_fmt}</span>'
+        f'</div>'
+        f'<p style="margin:6px 0 4px 0;font-size:0.95rem;color:#172B4D;font-weight:500">{resumo}</p>'
+        f'<div style="font-size:0.8rem;color:#6B778C;display:flex;flex-wrap:wrap;gap:12px">'
+        f'<span>📁 {projeto}</span><span>🏷️ {tipo}</span><span>👤 {responsavel}</span>{due_info}'
+        f'</div></div>'
+    )
+
+
+def dashboard():
+    """Dashboard Streamlit dinâmico — Valcann Jira."""
+    st.set_page_config(page_title="Valcann Dashboard", page_icon="🚀", layout="wide")
+
+    # ── CSS global ──────────────────────────────────────────────
+    st.markdown("""
+    <style>
+        [data-testid="stAppViewContainer"] > .main { background: #F4F5F7; }
+        [data-testid="stSidebar"] { background: #0052CC; }
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .stMarkdown { color: white !important; }
+        [data-testid="stSidebar"] .stButton > button {
+            background: white; color: #0052CC !important;
+            font-weight: 700; width: 100%; border-radius: 6px;
+            border: none; padding: 0.5rem;
+        }
+        [data-testid="stSidebar"] .stButton > button:hover {
+            background: #DEEBFF;
+        }
+        [data-testid="stSidebar"] [data-testid="stMultiSelect"] * { color: #172B4D !important; }
+        .kpi-card {
+            background: white; border-radius: 10px;
+            padding: 1.2rem 1.5rem; text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+        }
+        .kpi-val  { font-size: 2.4rem; font-weight: 800; line-height: 1.1; }
+        .kpi-lbl  { font-size: 0.78rem; color: #6B778C; margin-top: 4px; font-weight: 600; }
+        div[data-testid="stTabs"] [role="tab"] { font-weight: 600; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── Sidebar ─────────────────────────────────────────────────
+    with st.sidebar:
+        st.markdown("## 🚀 Valcann")
+        st.markdown("**Jira Dashboard**")
+        st.markdown("---")
+        if st.button("🔄 Atualizar Dados"):
+            st.cache_data.clear()
+            st.rerun()
+        st.caption(f"⏱ Agora: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        st.markdown("---")
+        st.markdown(
+            "📊 **KPIs** &nbsp;|&nbsp; 🔄 **Atividade**  \n"
+            "🚩 **Impedimentos** &nbsp;|&nbsp; 📈 **Progresso**  \n"
+            "⏰ **Prazos**"
+        )
+        st.markdown("---")
+        st.markdown(f"**Domínio:** `{DOMAIN}`")
+
+    # ── Cabeçalho ───────────────────────────────────────────────
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#0052CC 0%,#003884 100%);
+                padding:1.5rem 2rem;border-radius:12px;color:white;margin-bottom:1.5rem">
+        <h1 style="margin:0;font-size:1.8rem">🚀 Valcann — Dashboard Jira</h1>
+        <p style="margin:6px 0 0;opacity:0.85;font-size:0.9rem">
+            Monitoramento em tempo real · API REST v3
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Carrega todos os dados em paralelo ──────────────────────
+    erros        = {}
+    atualizadas  = []
+    flagged      = []
+    urgentes     = []
+    todas_issues = []
+
+    try:
+        with st.spinner("Carregando dados do Jira..."):
+            for nome, fn in [
+                ("atividade",  _buscar_atualizadas_48h),
+                ("flagged",    _buscar_flagged_dash),
+                ("urgentes",   _buscar_vencendo_em_breve),
+                ("progresso",  _buscar_progresso_dash),
+            ]:
+                try:
+                    resultado = fn()
+                    if nome == "atividade":  atualizadas  = resultado
+                    elif nome == "flagged":  flagged      = resultado
+                    elif nome == "urgentes": urgentes     = resultado
+                    else:                   todas_issues = resultado
+                except Exception as e:
+                    erros[nome] = str(e)
+    except Exception as e:
+        st.error(f"Erro crítico ao carregar dados: {e}")
+        st.exception(e)
+        return
+
+    if erros:
+        for k, msg in erros.items():
+            st.error(f"Erro ao buscar **{k}**: {msg}")
+
+    # ── Calcula progresso ───────────────────────────────────────
+    projetos_data   = {}
+    for issue in todas_issues:
+        fields  = issue.get("fields", {})
+        proj    = fields.get("project", {}).get("name", "Desconhecido")
+        cat_raw = fields.get("status", {}).get("statusCategory", {}).get("key", "todo")
+        cat     = CATEGORIAS.get(cat_raw, "A Fazer")  # categorias desconhecidas → A Fazer
+        if proj not in projetos_data:
+            projetos_data[proj] = {"A Fazer": 0, "Em Andamento": 0, "Concluído": 0}
+        projetos_data[proj][cat] += 1
+
+    total_geral     = sum(sum(c.values()) for c in projetos_data.values())
+    concluido_geral = sum(c.get("Concluído", 0) for c in projetos_data.values())
+    pct_geral       = round((concluido_geral / total_geral * 100) if total_geral else 0, 1)
+
+    # ── KPI Cards ───────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+    for col, val, label, cor in [
+        (c1, len(atualizadas), "🔄 Atualizadas (48h)",    "#0052CC"),
+        (c2, len(flagged),     "🚩 Impedimentos Ativos",  "#BF2600"),
+        (c3, len(urgentes),    "⏰ Vencem em 5 dias",     "#FF991F"),
+        (c4, f"{pct_geral}%", "📈 Progresso Geral",      "#00875A"),
+    ]:
+        with col:
+            st.markdown(
+                f'<div class="kpi-card" style="border-top:4px solid {cor}">'
+                f'<div class="kpi-val" style="color:{cor}">{val}</div>'
+                f'<div class="kpi-lbl">{label}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Tabs ────────────────────────────────────────────────────
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "🔄 Atividade Recente",
+        "🚩 Impedimentos",
+        "📈 Progresso por Projeto",
+        "⏰ Prazos Próximos",
+    ])
+
+    # ─ Tab 1: Atividade Recente ─────────────────────────────────
+    with tab1:
+        st.markdown(f"**{len(atualizadas)} issues** atualizadas nas últimas 48 horas")
+        if not atualizadas:
+            st.info("Nenhuma issue atualizada nas últimas 48 horas.")
+        else:
+            projetos_48h = sorted({i.get("fields", {}).get("project", {}).get("name", "—") for i in atualizadas})
+            priors_48h   = sorted({(i.get("fields", {}).get("priority") or {}).get("name", "—") for i in atualizadas})
+            col_f1, col_f2 = st.columns(2)
+            filtro_proj  = col_f1.multiselect("Filtrar por Projeto",    projetos_48h, placeholder="Todos")
+            filtro_prior = col_f2.multiselect("Filtrar por Prioridade", priors_48h,   placeholder="Todas")
+
+            issues_filtradas = [
+                i for i in atualizadas
+                if (not filtro_proj  or i.get("fields", {}).get("project", {}).get("name") in filtro_proj)
+                and (not filtro_prior or (i.get("fields", {}).get("priority") or {}).get("name") in filtro_prior)
+            ]
+            st.caption(f"Exibindo {len(issues_filtradas)} de {len(atualizadas)} issues")
+            st.markdown(
+                "".join(_card_issue(i) for i in issues_filtradas),
+                unsafe_allow_html=True,
+            )
+
+    # ─ Tab 2: Impedimentos ──────────────────────────────────────
+    with tab2:
+        if not flagged:
+            st.success("✅ Nenhum impedimento ativo no momento!")
+        else:
+            st.markdown(f"**{len(flagged)} tarefa(s)** com impedimento ativo")
+            por_projeto = {}
+            for issue in flagged:
+                proj = issue.get("fields", {}).get("project", {}).get("name", "—")
+                por_projeto.setdefault(proj, []).append(issue)
+            for proj_nome, issues_proj in sorted(por_projeto.items()):
+                qtd = len(issues_proj)
+                with st.expander(
+                    f"📁 {proj_nome}  ·  {qtd} impedimento{'s' if qtd > 1 else ''}",
+                    expanded=True,
+                ):
+                    st.markdown(
+                        "".join(_card_issue(i, show_flag=True) for i in issues_proj),
+                        unsafe_allow_html=True,
+                    )
+
+    # ─ Tab 3: Progresso por Projeto ─────────────────────────────
+    with tab3:
+        if not projetos_data:
+            st.info("Sem dados de progresso disponíveis.")
+        else:
+            col_g1, col_g2, col_g3 = st.columns(3)
+            col_g1.metric("Total de Issues", total_geral)
+            col_g2.metric("Concluídas",      concluido_geral)
+            col_g3.metric("Progresso Geral", f"{pct_geral}%")
+            st.markdown("---")
+
+            # Barra geral
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'
+                f'<span style="min-width:180px;font-weight:700;color:#172B4D">🏁 Geral</span>'
+                f'<div style="flex:1;height:20px;background:#DFE1E6;border-radius:10px;overflow:hidden">'
+                f'<div style="width:{pct_geral}%;height:100%;background:linear-gradient(90deg,#00875A,#36B37E);border-radius:10px"></div>'
+                f'</div>'
+                f'<span style="min-width:52px;text-align:right;font-weight:800;color:#00875A">{pct_geral}%</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Barras por projeto (ordenadas por % desc)
+            proj_ordenados = sorted(
+                projetos_data.items(),
+                key=lambda x: -(x[1].get("Concluído", 0) / max(sum(x[1].values()), 1)),
+            )
+            barras = []
+            for nome, cnts in proj_ordenados:
+                a_fazer      = cnts.get("A Fazer", 0)
+                em_andamento = cnts.get("Em Andamento", 0)
+                concluido    = cnts.get("Concluído", 0)
+                total        = a_fazer + em_andamento + concluido
+                pct          = round((concluido / total * 100) if total else 0, 1)
+                pct_af       = round((a_fazer      / total * 100) if total else 0, 1)
+                pct_em       = round((em_andamento / total * 100) if total else 0, 1)
+                pct_co       = round((concluido    / total * 100) if total else 0, 1)
+                barras.append(
+                    f'<div style="background:white;border-radius:8px;padding:12px 16px;margin-bottom:8px;'
+                    f'box-shadow:0 1px 4px rgba(0,0,0,0.06)">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+                    f'<span style="font-weight:700;color:#172B4D">{nome}</span>'
+                    f'<span style="font-size:0.78rem;color:#6B778C">'
+                    f'{total} issues &nbsp;·&nbsp; '
+                    f'<span style="color:#DFE1E6">●</span> {a_fazer} &nbsp;'
+                    f'<span style="color:#0052CC">●</span> {em_andamento} &nbsp;'
+                    f'<span style="color:#00875A">●</span> {concluido}'
+                    f'</span></div>'
+                    f'<div style="display:flex;height:16px;border-radius:8px;overflow:hidden;background:#F4F5F7">'
+                    f'<div style="width:{pct_co}%;background:#00875A" title="Concluído"></div>'
+                    f'<div style="width:{pct_em}%;background:#0052CC" title="Em Andamento"></div>'
+                    f'<div style="width:{pct_af}%;background:#DFE1E6" title="A Fazer"></div>'
+                    f'</div>'
+                    f'<div style="text-align:right;font-size:0.82rem;font-weight:800;color:#00875A;margin-top:4px">{pct}% concluído</div>'
+                    f'</div>'
+                )
+            st.markdown("".join(barras), unsafe_allow_html=True)
+
+            # Legenda
+            st.markdown(
+                '<div style="display:flex;gap:20px;font-size:0.8rem;color:#6B778C;margin-top:4px">'
+                '<span><span style="color:#00875A">█</span> Concluído</span>'
+                '<span><span style="color:#0052CC">█</span> Em Andamento</span>'
+                '<span><span style="color:#DFE1E6">█</span> A Fazer</span>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ─ Tab 4: Prazos Próximos ────────────────────────────────────
+    with tab4:
+        hoje   = date.today()
+        limite = hoje + timedelta(days=5)
+        st.caption(
+            f"Hoje: **{hoje.strftime('%d/%m/%Y')}** — "
+            f"até **{limite.strftime('%d/%m/%Y')}**"
+        )
+        if not urgentes:
+            st.success("✅ Nenhuma tarefa vencendo nos próximos 5 dias!")
+        else:
+            dias_map = [
+                _dias_restantes(i["fields"]["duedate"])
+                for i in urgentes
+                if i.get("fields", {}).get("duedate")
+            ]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total urgentes",       len(urgentes))
+            c2.metric("Vencem hoje/amanhã",   sum(1 for d in dias_map if d <= 1))
+            c3.metric("Vencem em 2–5 dias",   sum(1 for d in dias_map if 2 <= d <= 5))
+            st.markdown("---")
+
+            urgentes_ord = sorted(
+                [(i, _dias_restantes(i["fields"]["duedate"]))
+                 for i in urgentes if i.get("fields", {}).get("duedate")],
+                key=lambda x: x[1],
+            )
+            cards = []
+            for issue, dias in urgentes_ord:
+                fields     = issue.get("fields", {})
+                duedate    = fields.get("duedate")
+                summary    = fields.get("summary", "Sem nome")
+                status     = fields.get("status", {}).get("name", "—")
+                assignee   = (fields.get("assignee") or {}).get("displayName", "Não atribuído")
+                priority   = (fields.get("priority") or {}).get("name", "—")
+                issue_type = (fields.get("issuetype") or {}).get("name", "—")
+                key        = issue.get("key", "—")
+
+                if dias <= 0:   cor_borda, emoji = "#BF2600", "🔴"
+                elif dias == 1: cor_borda, emoji = "#FF5630", "🟠"
+                elif dias <= 3: cor_borda, emoji = "#FF991F", "🟡"
+                else:           cor_borda, emoji = "#00875A", "🟢"
+
+                cor_p = _cor_prioridade(priority)
+                cor_s = _cor_status(status)
+                prazo_fmt = date.fromisoformat(duedate).strftime("%d/%m/%Y")
+                suffix    = "s" if dias != 1 else ""
+
+                cards.append(
+                    f'<div style="background:white;border-radius:8px;padding:14px 18px;margin-bottom:12px;'
+                    f'border-left:5px solid {cor_borda};box-shadow:0 2px 8px rgba(0,0,0,0.07)">'
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">'
+                    f'<div>{emoji} '
+                    f'<a href="https://cesar-projetos4.atlassian.net/browse/{key}" target="_blank" '
+                    f'style="font-weight:700;color:#0052CC;text-decoration:none">{key}</a>&nbsp;'
+                    f'{_badge(status, cor_s)}{_badge(priority, cor_p)}'
+                    f'</div>'
+                    f'<span style="font-size:0.85rem;font-weight:700;color:{cor_borda}">'
+                    f'📅 {prazo_fmt} &nbsp;({dias} dia{suffix})'
+                    f'</span></div>'
+                    f'<p style="margin:6px 0 4px;font-size:0.95rem;color:#172B4D;font-weight:500">{summary}</p>'
+                    f'<div style="font-size:0.8rem;color:#6B778C;display:flex;flex-wrap:wrap;gap:14px">'
+                    f'<span>🏷️ {issue_type}</span><span>👤 {assignee}</span>'
+                    f'<a href="https://cesar-projetos4.atlassian.net/browse/{key}" target="_blank" '
+                    f'style="color:#0052CC;font-weight:600;text-decoration:none">🔗 Abrir no Jira</a>'
+                    f'</div></div>'
+                )
+            st.markdown("".join(cards), unsafe_allow_html=True)
+
+
+# ── PONTO DE ENTRADA ──────────────────────────────────────────
+_CLI_COMMANDS = {
+    "jira_api":  jira_api,
+    "48h":       contador_atualizadas_48h,
+    "flagged":   contador_flagged,
+    "progresso": porcentagem_projetos,
+}
+
+# Detecta contexto Streamlit e renderiza o dashboard
+_in_streamlit = False
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_ctx as _get_ctx
+    _in_streamlit = _get_ctx() is not None
+except Exception:
+    pass
+
+if _in_streamlit:
+    dashboard()
+
+if __name__ == "__main__":
+    # Não executa CLI quando já estamos dentro do contexto Streamlit
+    _em_streamlit = False
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx as _ctx_check
+        _em_streamlit = _ctx_check() is not None
+    except Exception:
+        pass
+
+    if not _em_streamlit:
+        cmd = sys.argv[1] if len(sys.argv) > 1 else None
+        if cmd in _CLI_COMMANDS:
+            try:
+                _CLI_COMMANDS[cmd]()
+            except requests.exceptions.HTTPError as err:
+                print(f"Erro HTTP ao conectar ao Jira: {err}")
+            except requests.exceptions.ConnectionError:
+                print("Erro de conexão. Verifique sua internet ou o domínio Jira.")
+            except Exception as err:
+                print(f"Erro inesperado: {err}")
+        else:
+            print("Uso: python valcann.py [jira_api|48h|flagged|progresso]")
+            print("Dashboard: streamlit run valcann.py")
