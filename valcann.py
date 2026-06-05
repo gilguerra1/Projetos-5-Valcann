@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta
 
 import requests
 import streamlit as st
+from streamlit_searchbox import st_searchbox
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -414,6 +415,59 @@ def _buscar_subtasks():
     return todas
 
 
+@st.cache_data(ttl=300)
+def _buscar_issues_projeto(project_key: str):
+    """Busca todas as issues de um projeto específico com campos detalhados."""
+    todas           = []
+    next_page_token = None
+    while True:
+        body = {
+            "jql": f'project = "{project_key}" ORDER BY updated DESC',
+            "fields": [
+                "summary", "status", "assignee", "priority",
+                "issuetype", "duedate", "updated", "created",
+                "customfield_10021",
+            ],
+            "maxResults": 100,
+        }
+        if next_page_token:
+            body["nextPageToken"] = next_page_token
+        response = requests.post(URL, data=json.dumps(body), auth=AUTH, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        dados = response.json()
+        raw   = dados.get("results") or dados.get("issues", [])
+        todas.extend([item.get("issue", item) for item in raw])
+        next_page_token = dados.get("nextPageToken")
+        if not next_page_token:
+            break
+    return todas
+
+
+@st.cache_data(ttl=300)
+def _buscar_historico_projeto(project_key: str):
+    """Busca issues com changelog expandido para montar histórico de movimentações."""
+    todas           = []
+    next_page_token = None
+    while True:
+        body = {
+            "jql": f'project = "{project_key}" ORDER BY updated DESC',
+            "fields": ["summary", "status", "issuetype"],
+            "expand": "changelog",
+            "maxResults": 50,
+        }
+        if next_page_token:
+            body["nextPageToken"] = next_page_token
+        response = requests.post(URL, data=json.dumps(body), auth=AUTH, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        dados = response.json()
+        raw   = dados.get("results") or dados.get("issues", [])
+        todas.extend([item.get("issue", item) for item in raw])
+        next_page_token = dados.get("nextPageToken")
+        if not next_page_token:
+            break
+    return todas
+
+
 # --- Helpers visuais ---
 
 def _dias_restantes(duedate_str: str) -> int:
@@ -625,217 +679,217 @@ def dashboard():
     concluido_geral = sum(c.get("Concluído", 0) for c in projetos_data.values())
     pct_geral       = round((concluido_geral / total_geral * 100) if total_geral else 0, 1)
 
-    # ── KPI Cards ───────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    for col, val, label, cor in [
-        (c1, len(atualizadas), "🔄 Atualizadas (48h)",    "#0052CC"),
-        (c2, len(flagged),     "🚩 Impedimentos Ativos",  "#BF2600"),
-        (c3, len(urgentes),    "⏰ Vencem em 5 dias",     "#FF991F"),
-        (c4, f"{pct_geral}%", "📈 Progresso Geral",      "#00875A"),
-    ]:
-        with col:
-            st.markdown(
-                f'<div class="kpi-card" style="border-top:4px solid {cor}">'
-                f'<div class="kpi-val" style="color:{cor}">{val}</div>'
-                f'<div class="kpi-lbl">{label}</div></div>',
-                unsafe_allow_html=True,
-            )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
     # ── Tabs ────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "🔄 Atividade Recente",
-        "🚩 Impedimentos",
-        "📈 Progresso por Projeto",
-        "⏰ Prazos Próximos",
+    tab1, tab2, tab3 = st.tabs([
+        "📊 Acompanhamento Geral",
         "👤 Por Responsável",
+        "🔍 Detalhes do Projeto",
     ])
 
-    # ─ Tab 1: Atividade Recente ─────────────────────────────────
+    # ─ Tab 1: Acompanhamento Geral ──────────────────────────────
     with tab1:
-        st.markdown(f"**{len(atualizadas)} issues** atualizadas nas últimas 48 horas")
-        if not atualizadas:
-            st.info("Nenhuma issue atualizada nas últimas 48 horas.")
-        else:
-            projetos_48h = sorted({i.get("fields", {}).get("project", {}).get("name", "—") for i in atualizadas})
-            priors_48h   = sorted({(i.get("fields", {}).get("priority") or {}).get("name", "—") for i in atualizadas})
-            col_f1, col_f2 = st.columns(2)
-            filtro_proj  = col_f1.multiselect("Filtrar por Projeto",    projetos_48h, placeholder="Todos")
-            filtro_prior = col_f2.multiselect("Filtrar por Prioridade", priors_48h,   placeholder="Todas")
 
-            issues_filtradas = [
-                i for i in atualizadas
-                if (not filtro_proj  or i.get("fields", {}).get("project", {}).get("name") in filtro_proj)
-                and (not filtro_prior or (i.get("fields", {}).get("priority") or {}).get("name") in filtro_prior)
-            ]
-            st.caption(f"Exibindo {len(issues_filtradas)} de {len(atualizadas)} issues")
-            st.markdown(
-                "".join(_card_issue(i) for i in issues_filtradas),
-                unsafe_allow_html=True,
-            )
+        # ── KPI Cards ───────────────────────────────────────────
+        c1, c2, c3, c4 = st.columns(4)
+        for col, val, label, cor in [
+            (c1, len(atualizadas), "🔄 Atualizadas (48h)",   "#0052CC"),
+            (c2, len(flagged),     "🚩 Impedimentos Ativos", "#BF2600"),
+            (c3, len(urgentes),    "⏰ Vencem em 5 dias",    "#FF991F"),
+            (c4, f"{pct_geral}%",  "📈 Progresso Geral",    "#00875A"),
+        ]:
+            with col:
+                st.markdown(
+                    f'<div class="kpi-card" style="border-top:4px solid {cor}">'
+                    f'<div class="kpi-val" style="color:{cor}">{val}</div>'
+                    f'<div class="kpi-lbl">{label}</div></div>',
+                    unsafe_allow_html=True,
+                )
 
-    # ─ Tab 2: Impedimentos ──────────────────────────────────────
-    with tab2:
-        if not flagged:
-            st.success("✅ Nenhum impedimento ativo no momento!")
-        else:
-            st.markdown(f"**{len(flagged)} tarefa(s)** com impedimento ativo")
-            por_projeto = {}
-            for issue in flagged:
-                proj = issue.get("fields", {}).get("project", {}).get("name", "—")
-                por_projeto.setdefault(proj, []).append(issue)
-            for proj_nome, issues_proj in sorted(por_projeto.items()):
-                qtd = len(issues_proj)
-                with st.expander(
-                    f"📁 {proj_nome}  ·  {qtd} impedimento{'s' if qtd > 1 else ''}",
-                    expanded=True,
-                ):
-                    st.markdown(
-                        "".join(_card_issue(i, show_flag=True) for i in issues_proj),
-                        unsafe_allow_html=True,
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Sub-abas do Acompanhamento Geral ─────────────────────
+        sub1, sub2, sub3, sub4 = st.tabs([
+            "📈 Progresso por Projeto",
+            "🚩 Impedimentos",
+            "⏰ Prazos Próximos",
+            "🔄 Atividade Recente (48h)",
+        ])
+
+        # ── Sub-aba 1: Progresso por Projeto ─────────────────────
+        with sub1:
+            if not projetos_data:
+                st.info("Sem dados de progresso disponíveis.")
+            else:
+                col_g1, col_g2, col_g3 = st.columns(3)
+                col_g1.metric("Total de Issues", total_geral)
+                col_g2.metric("Concluídas",      concluido_geral)
+                col_g3.metric("Progresso Geral", f"{pct_geral}%")
+                st.markdown("---")
+
+                st.markdown(
+                    f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'
+                    f'<span style="min-width:180px;font-weight:700;color:#172B4D">🏁 Geral</span>'
+                    f'<div style="flex:1;height:20px;background:#DFE1E6;border-radius:10px;overflow:hidden">'
+                    f'<div style="width:{pct_geral}%;height:100%;background:linear-gradient(90deg,#00875A,#36B37E);border-radius:10px"></div>'
+                    f'</div>'
+                    f'<span style="min-width:52px;text-align:right;font-weight:800;color:#00875A">{pct_geral}%</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+                proj_ordenados = sorted(
+                    projetos_data.items(),
+                    key=lambda x: -(x[1].get("Concluído", 0) / max(sum(x[1].values()), 1)),
+                )
+                barras = []
+                for nome, cnts in proj_ordenados:
+                    a_fazer      = cnts.get("A Fazer", 0)
+                    em_andamento = cnts.get("Em Andamento", 0)
+                    concluido    = cnts.get("Concluído", 0)
+                    total        = a_fazer + em_andamento + concluido
+                    pct          = round((concluido / total * 100) if total else 0, 1)
+                    pct_af       = round((a_fazer      / total * 100) if total else 0, 1)
+                    pct_em       = round((em_andamento / total * 100) if total else 0, 1)
+                    pct_co       = round((concluido    / total * 100) if total else 0, 1)
+                    barras.append(
+                        f'<div style="background:white;border-radius:8px;padding:12px 16px;margin-bottom:8px;'
+                        f'border:1px solid #DFE1E6;box-shadow:0 1px 4px rgba(0,0,0,0.06)">'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+                        f'<span style="font-weight:700;color:#172B4D">{nome}</span>'
+                        f'<span style="font-size:0.78rem;color:#6B778C">'
+                        f'{total} issues &nbsp;·&nbsp; '
+                        f'<span style="color:#DFE1E6">●</span> {a_fazer} &nbsp;'
+                        f'<span style="color:#0052CC">●</span> {em_andamento} &nbsp;'
+                        f'<span style="color:#00875A">●</span> {concluido}'
+                        f'</span></div>'
+                        f'<div style="display:flex;height:16px;border-radius:8px;overflow:hidden;background:#F4F5F7">'
+                        f'<div style="width:{pct_co}%;background:#00875A" title="Concluído"></div>'
+                        f'<div style="width:{pct_em}%;background:#0052CC" title="Em Andamento"></div>'
+                        f'<div style="width:{pct_af}%;background:#DFE1E6" title="A Fazer"></div>'
+                        f'</div>'
+                        f'<div style="text-align:right;font-size:0.82rem;font-weight:800;color:#00875A;margin-top:4px">{pct}% concluído</div>'
+                        f'</div>'
                     )
-
-    # ─ Tab 3: Progresso por Projeto ─────────────────────────────
-    with tab3:
-        if not projetos_data:
-            st.info("Sem dados de progresso disponíveis.")
-        else:
-            col_g1, col_g2, col_g3 = st.columns(3)
-            col_g1.metric("Total de Issues", total_geral)
-            col_g2.metric("Concluídas",      concluido_geral)
-            col_g3.metric("Progresso Geral", f"{pct_geral}%")
-            st.markdown("---")
-
-            # Barra geral
-            st.markdown(
-                f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">'
-                f'<span style="min-width:180px;font-weight:700;color:#172B4D">🏁 Geral</span>'
-                f'<div style="flex:1;height:20px;background:#DFE1E6;border-radius:10px;overflow:hidden">'
-                f'<div style="width:{pct_geral}%;height:100%;background:linear-gradient(90deg,#00875A,#36B37E);border-radius:10px"></div>'
-                f'</div>'
-                f'<span style="min-width:52px;text-align:right;font-weight:800;color:#00875A">{pct_geral}%</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-            # Barras por projeto (ordenadas por % desc)
-            proj_ordenados = sorted(
-                projetos_data.items(),
-                key=lambda x: -(x[1].get("Concluído", 0) / max(sum(x[1].values()), 1)),
-            )
-            barras = []
-            for nome, cnts in proj_ordenados:
-                a_fazer      = cnts.get("A Fazer", 0)
-                em_andamento = cnts.get("Em Andamento", 0)
-                concluido    = cnts.get("Concluído", 0)
-                total        = a_fazer + em_andamento + concluido
-                pct          = round((concluido / total * 100) if total else 0, 1)
-                pct_af       = round((a_fazer      / total * 100) if total else 0, 1)
-                pct_em       = round((em_andamento / total * 100) if total else 0, 1)
-                pct_co       = round((concluido    / total * 100) if total else 0, 1)
-                barras.append(
-                    f'<div style="background:white;border-radius:8px;padding:12px 16px;margin-bottom:8px;'
-                    f'box-shadow:0 1px 4px rgba(0,0,0,0.06)">'
-                    f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
-                    f'<span style="font-weight:700;color:#172B4D">{nome}</span>'
-                    f'<span style="font-size:0.78rem;color:#6B778C">'
-                    f'{total} issues &nbsp;·&nbsp; '
-                    f'<span style="color:#DFE1E6">●</span> {a_fazer} &nbsp;'
-                    f'<span style="color:#0052CC">●</span> {em_andamento} &nbsp;'
-                    f'<span style="color:#00875A">●</span> {concluido}'
-                    f'</span></div>'
-                    f'<div style="display:flex;height:16px;border-radius:8px;overflow:hidden;background:#F4F5F7">'
-                    f'<div style="width:{pct_co}%;background:#00875A" title="Concluído"></div>'
-                    f'<div style="width:{pct_em}%;background:#0052CC" title="Em Andamento"></div>'
-                    f'<div style="width:{pct_af}%;background:#DFE1E6" title="A Fazer"></div>'
-                    f'</div>'
-                    f'<div style="text-align:right;font-size:0.82rem;font-weight:800;color:#00875A;margin-top:4px">{pct}% concluído</div>'
-                    f'</div>'
+                st.markdown("".join(barras), unsafe_allow_html=True)
+                st.markdown(
+                    '<div style="display:flex;gap:20px;font-size:0.8rem;color:#6B778C;margin-top:4px">'
+                    '<span><span style="color:#00875A">█</span> Concluído</span>'
+                    '<span><span style="color:#0052CC">█</span> Em Andamento</span>'
+                    '<span><span style="color:#DFE1E6">█</span> A Fazer</span>'
+                    '</div>',
+                    unsafe_allow_html=True,
                 )
-            st.markdown("".join(barras), unsafe_allow_html=True)
 
-            # Legenda
-            st.markdown(
-                '<div style="display:flex;gap:20px;font-size:0.8rem;color:#6B778C;margin-top:4px">'
-                '<span><span style="color:#00875A">█</span> Concluído</span>'
-                '<span><span style="color:#0052CC">█</span> Em Andamento</span>'
-                '<span><span style="color:#DFE1E6">█</span> A Fazer</span>'
-                '</div>',
-                unsafe_allow_html=True,
+        # ── Sub-aba 2: Impedimentos ───────────────────────────────
+        with sub2:
+            if not flagged:
+                st.success("✅ Nenhum impedimento ativo no momento!")
+            else:
+                st.markdown(f"**{len(flagged)} tarefa(s)** com impedimento ativo")
+                por_projeto = {}
+                for issue in flagged:
+                    proj = issue.get("fields", {}).get("project", {}).get("name", "—")
+                    por_projeto.setdefault(proj, []).append(issue)
+                for proj_nome, issues_proj in sorted(por_projeto.items()):
+                    qtd = len(issues_proj)
+                    with st.expander(
+                        f"📁 {proj_nome}  ·  {qtd} impedimento{'s' if qtd > 1 else ''}",
+                        expanded=True,
+                    ):
+                        st.markdown(
+                            "".join(_card_issue(i, show_flag=True) for i in issues_proj),
+                            unsafe_allow_html=True,
+                        )
+
+        # ── Sub-aba 3: Prazos Próximos ────────────────────────────
+        with sub3:
+            hoje   = date.today()
+            limite = hoje + timedelta(days=5)
+            st.caption(
+                f"Hoje: **{hoje.strftime('%d/%m/%Y')}** — "
+                f"até **{limite.strftime('%d/%m/%Y')}**"
             )
-
-    # ─ Tab 4: Prazos Próximos ────────────────────────────────────
-    with tab4:
-        hoje   = date.today()
-        limite = hoje + timedelta(days=5)
-        st.caption(
-            f"Hoje: **{hoje.strftime('%d/%m/%Y')}** — "
-            f"até **{limite.strftime('%d/%m/%Y')}**"
-        )
-        if not urgentes:
-            st.success("✅ Nenhuma tarefa vencendo nos próximos 5 dias!")
-        else:
-            dias_map = [
-                _dias_restantes(i["fields"]["duedate"])
-                for i in urgentes
-                if i.get("fields", {}).get("duedate")
-            ]
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total urgentes",       len(urgentes))
-            c2.metric("Vencem hoje/amanhã",   sum(1 for d in dias_map if d <= 1))
-            c3.metric("Vencem em 2–5 dias",   sum(1 for d in dias_map if 2 <= d <= 5))
-            st.markdown("---")
-
-            urgentes_ord = sorted(
-                [(i, _dias_restantes(i["fields"]["duedate"]))
-                 for i in urgentes if i.get("fields", {}).get("duedate")],
-                key=lambda x: x[1],
-            )
-            cards = []
-            for issue, dias in urgentes_ord:
-                fields     = issue.get("fields", {})
-                duedate    = fields.get("duedate")
-                summary    = fields.get("summary", "Sem nome")
-                status     = fields.get("status", {}).get("name", "—")
-                assignee   = (fields.get("assignee") or {}).get("displayName", "Não atribuído")
-                priority   = (fields.get("priority") or {}).get("name", "—")
-                issue_type = (fields.get("issuetype") or {}).get("name", "—")
-                key        = issue.get("key", "—")
-
-                if dias <= 0:   cor_borda, emoji = "#BF2600", "🔴"
-                elif dias == 1: cor_borda, emoji = "#FF5630", "🟠"
-                elif dias <= 3: cor_borda, emoji = "#FF991F", "🟡"
-                else:           cor_borda, emoji = "#00875A", "🟢"
-
-                cor_p = _cor_prioridade(priority)
-                cor_s = _cor_status(status)
-                prazo_fmt = date.fromisoformat(duedate).strftime("%d/%m/%Y")
-                suffix    = "s" if dias != 1 else ""
-
-                cards.append(
-                    f'<div style="background:white;border-radius:8px;padding:14px 18px;margin-bottom:12px;'
-                    f'border-left:5px solid {cor_borda};box-shadow:0 2px 8px rgba(0,0,0,0.07)">'
-                    f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">'
-                    f'<div>{emoji} '
-                    f'<a href="https://cesar-projetos4.atlassian.net/browse/{key}" target="_blank" '
-                    f'style="font-weight:700;color:#0052CC;text-decoration:none">{key}</a>&nbsp;'
-                    f'{_badge(status, cor_s)}{_badge(priority, cor_p)}'
-                    f'</div>'
-                    f'<span style="font-size:0.85rem;font-weight:700;color:{cor_borda}">'
-                    f'📅 {prazo_fmt} &nbsp;({dias} dia{suffix})'
-                    f'</span></div>'
-                    f'<p style="margin:6px 0 4px;font-size:0.95rem;color:#172B4D;font-weight:500">{summary}</p>'
-                    f'<div style="font-size:0.8rem;color:#6B778C;display:flex;flex-wrap:wrap;gap:14px">'
-                    f'<span>🏷️ {issue_type}</span><span>👤 {assignee}</span>'
-                    f'<a href="https://cesar-projetos4.atlassian.net/browse/{key}" target="_blank" '
-                    f'style="color:#0052CC;font-weight:600;text-decoration:none">🔗 Abrir no Jira</a>'
-                    f'</div></div>'
+            if not urgentes:
+                st.success("✅ Nenhuma tarefa vencendo nos próximos 5 dias!")
+            else:
+                dias_map = [
+                    _dias_restantes(i["fields"]["duedate"])
+                    for i in urgentes
+                    if i.get("fields", {}).get("duedate")
+                ]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total urgentes",     len(urgentes))
+                c2.metric("Vencem hoje/amanhã", sum(1 for d in dias_map if d <= 1))
+                c3.metric("Vencem em 2–5 dias", sum(1 for d in dias_map if 2 <= d <= 5))
+                st.markdown("---")
+                urgentes_ord = sorted(
+                    [(i, _dias_restantes(i["fields"]["duedate"]))
+                     for i in urgentes if i.get("fields", {}).get("duedate")],
+                    key=lambda x: x[1],
                 )
-            st.markdown("".join(cards), unsafe_allow_html=True)
+                cards = []
+                for issue, dias in urgentes_ord:
+                    fields     = issue.get("fields", {})
+                    duedate    = fields.get("duedate")
+                    summary    = fields.get("summary", "Sem nome")
+                    status     = fields.get("status", {}).get("name", "—")
+                    assignee   = (fields.get("assignee") or {}).get("displayName", "Não atribuído")
+                    priority   = (fields.get("priority") or {}).get("name", "—")
+                    issue_type = (fields.get("issuetype") or {}).get("name", "—")
+                    key        = issue.get("key", "—")
+                    if dias <= 0:   cor_borda, emoji = "#BF2600", "🔴"
+                    elif dias == 1: cor_borda, emoji = "#FF5630", "🟠"
+                    elif dias <= 3: cor_borda, emoji = "#FF991F", "🟡"
+                    else:           cor_borda, emoji = "#00875A", "🟢"
+                    cor_p = _cor_prioridade(priority)
+                    cor_s = _cor_status(status)
+                    prazo_fmt = date.fromisoformat(duedate).strftime("%d/%m/%Y")
+                    suffix    = "s" if dias != 1 else ""
+                    cards.append(
+                        f'<div style="background:white;border-radius:8px;padding:14px 18px;margin-bottom:12px;'
+                        f'border-left:5px solid {cor_borda};box-shadow:0 2px 8px rgba(0,0,0,0.07)">'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px">'
+                        f'<div>{emoji} '
+                        f'<a href="https://cesar-projetos4.atlassian.net/browse/{key}" target="_blank" '
+                        f'style="font-weight:700;color:#0052CC;text-decoration:none">{key}</a>&nbsp;'
+                        f'{_badge(status, cor_s)}{_badge(priority, cor_p)}'
+                        f'</div>'
+                        f'<span style="font-size:0.85rem;font-weight:700;color:{cor_borda}">'
+                        f'📅 {prazo_fmt} &nbsp;({dias} dia{suffix})'
+                        f'</span></div>'
+                        f'<p style="margin:6px 0 4px;font-size:0.95rem;color:#172B4D;font-weight:500">{summary}</p>'
+                        f'<div style="font-size:0.8rem;color:#6B778C;display:flex;flex-wrap:wrap;gap:14px">'
+                        f'<span>🏷️ {issue_type}</span><span>👤 {assignee}</span>'
+                        f'<a href="https://cesar-projetos4.atlassian.net/browse/{key}" target="_blank" '
+                        f'style="color:#0052CC;font-weight:600;text-decoration:none">🔗 Abrir no Jira</a>'
+                        f'</div></div>'
+                    )
+                st.markdown("".join(cards), unsafe_allow_html=True)
 
-    # ─ Tab 5: Por Responsável (Epics + Tasks filhas) ──────────────
-    with tab5:
+        # ── Sub-aba 4: Atividade Recente ──────────────────────────
+        with sub4:
+            st.markdown(f"**{len(atualizadas)} issues** atualizadas nas últimas 48 horas")
+            if not atualizadas:
+                st.info("Nenhuma issue atualizada nas últimas 48 horas.")
+            else:
+                projetos_48h = sorted({i.get("fields", {}).get("project", {}).get("name", "—") for i in atualizadas})
+                priors_48h   = sorted({(i.get("fields", {}).get("priority") or {}).get("name", "—") for i in atualizadas})
+                col_f1, col_f2 = st.columns(2)
+                filtro_proj  = col_f1.multiselect("Filtrar por Projeto",    projetos_48h, placeholder="Todos")
+                filtro_prior = col_f2.multiselect("Filtrar por Prioridade", priors_48h,   placeholder="Todas")
+                issues_filtradas = [
+                    i for i in atualizadas
+                    if (not filtro_proj  or i.get("fields", {}).get("project", {}).get("name") in filtro_proj)
+                    and (not filtro_prior or (i.get("fields", {}).get("priority") or {}).get("name") in filtro_prior)
+                ]
+                st.caption(f"Exibindo {len(issues_filtradas)} de {len(atualizadas)} issues")
+                st.markdown(
+                    "".join(_card_issue(i) for i in issues_filtradas),
+                    unsafe_allow_html=True,
+                )
+
+    # ─ Tab 2: Por Responsável (Epics + Tasks filhas) ─────────────
+    with tab2:
         if not issues_lider:
             st.info("Sem dados de assignees disponíveis.")
         else:
@@ -889,139 +943,348 @@ def dashboard():
             total_tasks = sum(len(epic_to_tasks.get(i.get("key", ""), [])) for i in epics_a)
             pct_epics   = round((conc_epics / total_epics * 100) if total_epics else 0, 1)
 
-            c1a, c2a, c3a, c4a = st.columns(4)
-            for col_a, val_a, lbl_a, cor_a in [
-                (c1a, total_epics,    "🗂️ Epics",              "#6554C0"),
-                (c2a, total_tasks,    "📋 Tasks Associadas",   "#0052CC"),
-                (c3a, conc_epics,     "✅ Epics Concluídos",   "#00875A"),
-                (c4a, f"{pct_epics}%","📈 % Epics Concluídos", "#00875A"),
-            ]:
-                with col_a:
-                    st.markdown(
-                        f'<div class="kpi-card" style="border-top:4px solid {cor_a}">'
-                        f'<div class="kpi-val" style="color:{cor_a}">{val_a}</div>'
-                        f'<div class="kpi-lbl">{lbl_a}</div></div>',
-                        unsafe_allow_html=True,
-                    )
+            # ── Sub-abas da aba Por Responsável ──────────────────────────
+            sub_a, sub_b = st.tabs(["📊 Resumo", "📌 Epics & Tasks"])
 
-            st.markdown("<br>", unsafe_allow_html=True)
-
-            # Filtra adicionais
-            col_fp, col_fs = st.columns(2)
-            projs_e = sorted({i.get("fields", {}).get("project", {}).get("name", "—") for i in epics_a})
-            stats_e = sorted({i.get("fields", {}).get("status", {}).get("name", "—") for i in epics_a})
-            fil_proj_e   = col_fp.multiselect("Filtrar por Projeto", projs_e, placeholder="Todos", key="e_proj")
-            fil_status_e = col_fs.multiselect("Filtrar por Status",  stats_e, placeholder="Todos", key="e_status")
-
-            epics_filtrados = [
-                i for i in epics_a
-                if (not fil_proj_e   or i.get("fields", {}).get("project", {}).get("name") in fil_proj_e)
-                and (not fil_status_e or i.get("fields", {}).get("status",  {}).get("name") in fil_status_e)
-            ]
-
-            st.caption(f"Exibindo {len(epics_filtrados)} Epics")
-            st.markdown("---")
-
-            # Epics agrupados por projeto, com expanders mostrando tasks filhas
-            por_projeto_e = {}
-            for epic in epics_filtrados:
-                pnome = epic.get("fields", {}).get("project", {}).get("name", "Desconhecido")
-                por_projeto_e.setdefault(pnome, []).append(epic)
-
-            for proj_nome in sorted(por_projeto_e.keys()):
-                st.markdown(f"#### 📁 {proj_nome}")
-                for epic in por_projeto_e[proj_nome]:
-                    efields   = epic.get("fields", {})
-                    ekey      = epic.get("key", "—")
-                    esummary  = efields.get("summary", "Sem título")
-                    estatus   = efields.get("status", {}).get("name", "—")
-                    epriority = (efields.get("priority") or {}).get("name", "—")
-                    eassignee = (efields.get("assignee") or {}).get("displayName", "Não atribuído")
-                    cor_s_e   = _cor_status(estatus)
-                    cor_p_e   = _cor_prioridade(epriority)
-                    tasks_do_epic = epic_to_tasks.get(ekey, [])
-                    n_tasks   = len(tasks_do_epic)
-                    n_conc    = sum(1 for t in tasks_do_epic if _cat_issue(t) == "Concluído")
-                    n_and     = sum(1 for t in tasks_do_epic if _cat_issue(t) == "Em Andamento")
-                    pct_e     = round((n_conc / n_tasks * 100) if n_tasks else 0, 1)
-
-                    label_exp = (
-                        f"📌 [{ekey}] {esummary}  ·  "
-                        f"{estatus}  ·  {n_tasks} tasks  ·  {pct_e}% concluído"
-                    )
-                    with st.expander(label_exp, expanded=False):
-                        # Cabeçalho do Epic
+            with sub_a:
+                c1a, c2a, c3a, c4a = st.columns(4)
+                for col_a, val_a, lbl_a, cor_a in [
+                    (c1a, total_epics,    "🗂️ Epics",              "#6554C0"),
+                    (c2a, total_tasks,    "📋 Tasks Associadas",   "#0052CC"),
+                    (c3a, conc_epics,     "✅ Epics Concluídos",   "#00875A"),
+                    (c4a, f"{pct_epics}%","📈 % Epics Concluídos", "#00875A"),
+                ]:
+                    with col_a:
                         st.markdown(
-                            f'{_badge(estatus, cor_s_e)}{_badge(epriority, cor_p_e)}'
-                            f'&nbsp;<span style="font-size:0.82rem;color:#6B778C">👤 {eassignee}</span>'
-                            f'&nbsp;&nbsp;<a href="https://cesar-projetos4.atlassian.net/browse/{ekey}" '
-                            f'target="_blank" style="font-size:0.82rem;color:#0052CC">🔗 Abrir no Jira</a>',
+                            f'<div class="kpi-card" style="border-top:4px solid {cor_a}">'
+                            f'<div class="kpi-val" style="color:{cor_a}">{val_a}</div>'
+                            f'<div class="kpi-lbl">{lbl_a}</div></div>',
                             unsafe_allow_html=True,
                         )
 
-                        if n_tasks > 0:
-                            # Barra de progresso do Epic
-                            pct_af_e = round(((n_tasks - n_conc - n_and) / n_tasks * 100), 1)
-                            pct_em_e = round((n_and / n_tasks * 100), 1)
-                            pct_co_e = round((n_conc / n_tasks * 100), 1)
+            with sub_b:
+                col_fp, col_fs = st.columns(2)
+                projs_e = sorted({i.get("fields", {}).get("project", {}).get("name", "—") for i in epics_a})
+                stats_e = sorted({i.get("fields", {}).get("status", {}).get("name", "—") for i in epics_a})
+                fil_proj_e   = col_fp.multiselect("Filtrar por Projeto", projs_e, placeholder="Todos", key="e_proj")
+                fil_status_e = col_fs.multiselect("Filtrar por Status",  stats_e, placeholder="Todos", key="e_status")
+
+                epics_filtrados = [
+                    i for i in epics_a
+                    if (not fil_proj_e   or i.get("fields", {}).get("project", {}).get("name") in fil_proj_e)
+                    and (not fil_status_e or i.get("fields", {}).get("status",  {}).get("name") in fil_status_e)
+                ]
+
+                st.caption(f"Exibindo {len(epics_filtrados)} Epics")
+                st.markdown("---")
+
+                por_projeto_e = {}
+                for epic in epics_filtrados:
+                    pnome = epic.get("fields", {}).get("project", {}).get("name", "Desconhecido")
+                    por_projeto_e.setdefault(pnome, []).append(epic)
+
+                for proj_nome in sorted(por_projeto_e.keys()):
+                    st.markdown(f"#### 📁 {proj_nome}")
+                    for epic in por_projeto_e[proj_nome]:
+                        efields   = epic.get("fields", {})
+                        ekey      = epic.get("key", "—")
+                        esummary  = efields.get("summary", "Sem título")
+                        estatus   = efields.get("status", {}).get("name", "—")
+                        epriority = (efields.get("priority") or {}).get("name", "—")
+                        eassignee = (efields.get("assignee") or {}).get("displayName", "Não atribuído")
+                        cor_s_e   = _cor_status(estatus)
+                        cor_p_e   = _cor_prioridade(epriority)
+                        tasks_do_epic = epic_to_tasks.get(ekey, [])
+                        n_tasks   = len(tasks_do_epic)
+                        n_conc    = sum(1 for t in tasks_do_epic if _cat_issue(t) == "Concluído")
+                        n_and     = sum(1 for t in tasks_do_epic if _cat_issue(t) == "Em Andamento")
+                        pct_e     = round((n_conc / n_tasks * 100) if n_tasks else 0, 1)
+
+                        label_exp = (
+                            f"📌 [{ekey}] {esummary}  ·  "
+                            f"{estatus}  ·  {n_tasks} tasks  ·  {pct_e}% concluído"
+                        )
+                        with st.expander(label_exp, expanded=False):
                             st.markdown(
-                                f'<div style="display:flex;height:10px;border-radius:6px;overflow:hidden;'
-                                f'background:#F4F5F7;margin:8px 0 12px">'
-                                f'<div style="width:{pct_co_e}%;background:#00875A"></div>'
-                                f'<div style="width:{pct_em_e}%;background:#0052CC"></div>'
-                                f'<div style="width:{pct_af_e}%;background:#DFE1E6"></div>'
-                                f'</div>',
+                                f'{_badge(estatus, cor_s_e)}{_badge(epriority, cor_p_e)}'
+                                f'&nbsp;<span style="font-size:0.82rem;color:#6B778C">👤 {eassignee}</span>'
+                                f'&nbsp;&nbsp;<a href="https://cesar-projetos4.atlassian.net/browse/{ekey}" '
+                                f'target="_blank" style="font-size:0.82rem;color:#0052CC">🔗 Abrir no Jira</a>',
                                 unsafe_allow_html=True,
                             )
-                            # Cada história/task com suas sub-tarefas aninhadas
-                            for task in tasks_do_epic:
-                                tkey     = task.get("key", "—")
-                                tfields  = task.get("fields", {})
-                                tsummary = tfields.get("summary", "Sem título")
-                                tstatus  = tfields.get("status", {}).get("name", "—")
-                                ttype    = (tfields.get("issuetype") or {}).get("name", "—")
-                                tassign  = (tfields.get("assignee") or {}).get("displayName", "Não atribuído")
-                                tprio    = (tfields.get("priority") or {}).get("name", "—")
-                                cor_st   = _cor_status(tstatus)
-                                cor_pt   = _cor_prioridade(tprio)
-                                subs     = story_to_subtasks.get(tkey, [])
 
-                                # Card da história
-                                st.markdown(_card_issue(task), unsafe_allow_html=True)
+                            if n_tasks > 0:
+                                pct_af_e = round(((n_tasks - n_conc - n_and) / n_tasks * 100), 1)
+                                pct_em_e = round((n_and / n_tasks * 100), 1)
+                                pct_co_e = round((n_conc / n_tasks * 100), 1)
+                                st.markdown(
+                                    f'<div style="display:flex;height:10px;border-radius:6px;overflow:hidden;'
+                                    f'background:#F4F5F7;margin:8px 0 12px">'
+                                    f'<div style="width:{pct_co_e}%;background:#00875A"></div>'
+                                    f'<div style="width:{pct_em_e}%;background:#0052CC"></div>'
+                                    f'<div style="width:{pct_af_e}%;background:#DFE1E6"></div>'
+                                    f'</div>',
+                                    unsafe_allow_html=True,
+                                )
+                                for task in tasks_do_epic:
+                                    tkey     = task.get("key", "—")
+                                    tfields  = task.get("fields", {})
+                                    tsummary = tfields.get("summary", "Sem título")
+                                    tstatus  = tfields.get("status", {}).get("name", "—")
+                                    ttype    = (tfields.get("issuetype") or {}).get("name", "—")
+                                    tassign  = (tfields.get("assignee") or {}).get("displayName", "Não atribuído")
+                                    tprio    = (tfields.get("priority") or {}).get("name", "—")
+                                    cor_st   = _cor_status(tstatus)
+                                    cor_pt   = _cor_prioridade(tprio)
+                                    subs     = story_to_subtasks.get(tkey, [])
 
-                                # Sub-tarefas aninhadas
-                                if subs:
-                                    sub_html = []
-                                    for sub in subs:
-                                        sk     = sub.get("key", "—")
-                                        sf     = sub.get("fields", {})
-                                        ss_nam = sf.get("summary", "—")
-                                        ss_st  = sf.get("status", {}).get("name", "—")
-                                        ss_as  = (sf.get("assignee") or {}).get("displayName", "Não atribuído")
-                                        ss_pr  = (sf.get("priority") or {}).get("name", "—")
-                                        cor_ss = _cor_status(ss_st)
-                                        cor_ps = _cor_prioridade(ss_pr)
-                                        sub_html.append(
-                                            f'<div style="margin:0 0 6px 24px;background:#F8F9FA;'
-                                            f'border-radius:6px;padding:8px 12px;'
-                                            f'border-left:3px solid {cor_ss}">'
-                                            f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
-                                            f'<span style="font-size:0.75rem;color:#6B778C">↳</span>'
-                                            f'<a href="https://cesar-projetos4.atlassian.net/browse/{sk}" '
-                                            f'target="_blank" style="font-weight:700;color:#0052CC;'
-                                            f'font-size:0.82rem;text-decoration:none">{sk}</a>'
-                                            f'{_badge(ss_st, cor_ss)}{_badge(ss_pr, cor_ps)}'
-                                            f'</div>'
-                                            f'<p style="margin:4px 0 2px 18px;font-size:0.85rem;color:#172B4D">'
-                                            f'{ss_nam}</p>'
-                                            f'<span style="margin-left:18px;font-size:0.75rem;color:#6B778C">'
-                                            f'👤 {ss_as}</span>'
-                                            f'</div>'
-                                        )
-                                    st.markdown("".join(sub_html), unsafe_allow_html=True)
+                                    st.markdown(_card_issue(task), unsafe_allow_html=True)
+
+                                    if subs:
+                                        sub_html = []
+                                        for sub in subs:
+                                            sk     = sub.get("key", "—")
+                                            sf     = sub.get("fields", {})
+                                            ss_nam = sf.get("summary", "—")
+                                            ss_st  = sf.get("status", {}).get("name", "—")
+                                            ss_as  = (sf.get("assignee") or {}).get("displayName", "Não atribuído")
+                                            ss_pr  = (sf.get("priority") or {}).get("name", "—")
+                                            cor_ss = _cor_status(ss_st)
+                                            cor_ps = _cor_prioridade(ss_pr)
+                                            sub_html.append(
+                                                f'<div style="margin:0 0 6px 24px;background:#F8F9FA;'
+                                                f'border-radius:6px;padding:8px 12px;'
+                                                f'border-left:3px solid {cor_ss}">'
+                                                f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+                                                f'<span style="font-size:0.75rem;color:#6B778C">↳</span>'
+                                                f'<a href="https://cesar-projetos4.atlassian.net/browse/{sk}" '
+                                                f'target="_blank" style="font-weight:700;color:#0052CC;'
+                                                f'font-size:0.82rem;text-decoration:none">{sk}</a>'
+                                                f'{_badge(ss_st, cor_ss)}{_badge(ss_pr, cor_ps)}'
+                                                f'</div>'
+                                                f'<p style="margin:4px 0 2px 18px;font-size:0.85rem;color:#172B4D">'
+                                                f'{ss_nam}</p>'
+                                                f'<span style="margin-left:18px;font-size:0.75rem;color:#6B778C">'
+                                                f'👤 {ss_as}</span>'
+                                                f'</div>'
+                                            )
+                                        st.markdown("".join(sub_html), unsafe_allow_html=True)
+                            else:
+                                st.info("Nenhuma task associada a este Epic.")
+
+    # ─ Tab 3: Detalhes do Projeto ────────────────────────────────
+    with tab3:
+        if not gestores_map:
+            st.info("Sem projetos disponíveis.")
+        else:
+            proj_opcoes = {v["name"]: k for k, v in gestores_map.items()}
+            nomes_todos = sorted(proj_opcoes.keys())
+
+            def _search_proj(term: str):
+                if not term:
+                    return nomes_todos
+                t = term.strip().lower()
+                return [n for n in nomes_todos if t in n.lower()]
+
+            col_sel6, _ = st.columns([1, 3])
+            with col_sel6:
+                sel = st_searchbox(
+                    _search_proj,
+                    placeholder="🔍 Digite o nome do projeto...",
+                    key="proj_searchbox",
+                    default=nomes_todos[0] if nomes_todos else None,
+                    clear_on_submit=False,
+                )
+            proj_nome_sel = sel if sel in proj_opcoes else nomes_todos[0]
+            proj_key_sel  = proj_opcoes[proj_nome_sel]
+            issues_proj_det = []
+            issues_hist_det = []
+            erro_proj       = None
+
+            with st.spinner(f"Carregando '{proj_nome_sel}'..."):
+                try:
+                    issues_proj_det = _buscar_issues_projeto(proj_key_sel)
+                except Exception as e:
+                    erro_proj = str(e)
+                try:
+                    issues_hist_det = _buscar_historico_projeto(proj_key_sel)
+                except Exception as e:
+                    if not erro_proj:
+                        erro_proj = str(e)
+
+            if erro_proj:
+                st.error(f"Erro ao carregar dados do projeto: {erro_proj}")
+            elif not issues_proj_det:
+                st.info("Nenhuma issue encontrada para este projeto.")
+            else:
+                hoje_det   = date.today()
+                limite_det = hoje_det + timedelta(days=5)
+                n_af = n_em = n_co = n_imp = n_prazo = 0
+
+                for issue in issues_proj_det:
+                    fields  = issue.get("fields", {})
+                    cat_raw = fields.get("status", {}).get("statusCategory", {}).get("key", "todo")
+                    cat     = CATEGORIAS.get(cat_raw, "A Fazer")
+                    if cat == "A Fazer":        n_af  += 1
+                    elif cat == "Em Andamento": n_em  += 1
+                    elif cat == "Concluído":    n_co  += 1
+                    if fields.get("customfield_10021"):
+                        n_imp += 1
+                    due_s = fields.get("duedate", "")
+                    if due_s and cat != "Concluído":
+                        try:
+                            if hoje_det <= date.fromisoformat(due_s) <= limite_det:
+                                n_prazo += 1
+                        except Exception:
+                            pass
+
+                total_det = len(issues_proj_det)
+                pct_det   = round((n_co / total_det * 100) if total_det else 0, 1)
+
+                # ── Sub-abas do Detalhes do Projeto ──────────────────────
+                sub_p1, sub_p2 = st.tabs(["📊 Resumo", "🕐 Histórico de Movimentação"])
+
+                with sub_p1:
+                    c1d, c2d, c3d, c4d, c5d = st.columns(5)
+                    for col_d, val_d, lbl_d, cor_d in [
+                        (c1d, n_af,    "📋 A Fazer",         "#6554C0"),
+                        (c2d, n_em,    "🔄 Em Andamento",    "#0052CC"),
+                        (c3d, n_co,    "✅ Concluídas",      "#00875A"),
+                        (c4d, n_imp,   "🚩 Impedimentos",    "#BF2600"),
+                        (c5d, n_prazo, "⏰ Prazos a Vencer", "#FF991F"),
+                    ]:
+                        with col_d:
+                            st.markdown(
+                                f'<div class="kpi-card" style="border-top:4px solid {cor_d}">'
+                                f'<div class="kpi-val" style="color:{cor_d}">{val_d}</div>'
+                                f'<div class="kpi-lbl">{lbl_d}</div></div>',
+                                unsafe_allow_html=True,
+                            )
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    pct_af_d = round((n_af / total_det * 100) if total_det else 0, 1)
+                    pct_em_d = round((n_em / total_det * 100) if total_det else 0, 1)
+                    pct_co_d = round((n_co / total_det * 100) if total_det else 0, 1)
+                    st.markdown(
+                        f'<div style="background:white;border-radius:10px;padding:20px 24px;'
+                        f'margin-bottom:6px;box-shadow:0 1px 6px rgba(0,0,0,0.07)">'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'
+                        f'<span style="font-weight:700;font-size:1rem;color:#172B4D">{proj_nome_sel}</span>'
+                        f'<span style="font-size:0.82rem;color:#6B778C">'
+                        f'{total_det} issues &nbsp;·&nbsp; '
+                        f'<span style="color:#6554C0">●</span> {n_af} A Fazer &nbsp;'
+                        f'<span style="color:#0052CC">●</span> {n_em} Em Andamento &nbsp;'
+                        f'<span style="color:#00875A">●</span> {n_co} Concluído'
+                        f'</span></div>'
+                        f'<div style="display:flex;height:26px;border-radius:13px;overflow:hidden;background:#F4F5F7">'
+                        f'<div style="width:{pct_co_d}%;background:linear-gradient(90deg,#00875A,#36B37E)" '
+                        f'title="Concluído: {n_co}"></div>'
+                        f'<div style="width:{pct_em_d}%;background:linear-gradient(90deg,#0052CC,#2684FF)" '
+                        f'title="Em Andamento: {n_em}"></div>'
+                        f'<div style="width:{pct_af_d}%;background:#DFE1E6" title="A Fazer: {n_af}"></div>'
+                        f'</div>'
+                        f'<div style="text-align:right;font-size:1.3rem;font-weight:800;color:#00875A;margin-top:8px">'
+                        f'{pct_det}% concluído</div>'
+                        f'</div>'
+                        f'<div style="display:flex;gap:20px;font-size:0.8rem;color:#6B778C;margin-bottom:20px">'
+                        f'<span><span style="color:#00875A">█</span> Concluído ({pct_co_d}%)</span>'
+                        f'<span><span style="color:#0052CC">█</span> Em Andamento ({pct_em_d}%)</span>'
+                        f'<span><span style="color:#6554C0">█</span> A Fazer ({pct_af_d}%)</span>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                with sub_p2:
+                    eventos = []
+                    for issue in issues_hist_det:
+                        ikey      = issue.get("key", "—")
+                        isummary  = issue.get("fields", {}).get("summary", "Sem título")
+                        changelog = issue.get("changelog", {})
+                        histories = changelog.get("histories") or changelog.get("values", [])
+                        for hist in histories:
+                            criado_str = hist.get("created", "")
+                            autor      = (hist.get("author") or {}).get("displayName", "Sistema")
+                            for item_h in hist.get("items", []):
+                                if item_h.get("field", "").lower() == "status":
+                                    try:
+                                        dt_ev  = datetime.fromisoformat(criado_str.replace("Z", "+00:00"))
+                                        dt_loc = dt_ev.replace(tzinfo=None)
+                                    except Exception:
+                                        dt_loc = None
+                                    eventos.append({
+                                        "data":   dt_loc,
+                                        "issue":  ikey,
+                                        "resumo": isummary,
+                                        "de":     item_h.get("fromString", "—"),
+                                        "para":   item_h.get("toString",   "—"),
+                                        "autor":  autor,
+                                    })
+
+                    if not eventos:
+                        st.info(
+                            "Nenhum histórico de movimentação disponível. "
+                            "O Jira pode não estar retornando o changelog para este projeto."
+                        )
+                    else:
+                        eventos.sort(key=lambda x: x["data"] or datetime.min, reverse=True)
+                        datas_ev    = [e["data"].date() for e in eventos if e["data"]]
+                        data_min_ev = min(datas_ev) if datas_ev else date.today()
+                        data_max_ev = max(datas_ev) if datas_ev else date.today()
+
+                        col_h1, col_h2, col_h3 = st.columns([1, 1, 2])
+                        with col_h1:
+                            filtro_ini = st.date_input(
+                                "📅 De",
+                                value=data_min_ev,
+                                min_value=data_min_ev,
+                                max_value=data_max_ev,
+                                key="hist_ini",
+                            )
+                        with col_h2:
+                            filtro_fim = st.date_input(
+                                "📅 Até",
+                                value=data_max_ev,
+                                min_value=data_min_ev,
+                                max_value=data_max_ev,
+                                key="hist_fim",
+                            )
+
+                        evs_fil = [
+                            e for e in eventos
+                            if e["data"] and filtro_ini <= e["data"].date() <= filtro_fim
+                        ]
+                        st.caption(f"Exibindo **{len(evs_fil)}** movimentação(ões) no período")
+
+                        if not evs_fil:
+                            st.info("Nenhuma movimentação no período selecionado.")
                         else:
-                            st.info("Nenhuma task associada a este Epic.")
-
+                            cards_h = []
+                            for ev in evs_fil:
+                                data_fmt = ev["data"].strftime("%d/%m/%Y %H:%M") if ev["data"] else "—"
+                                cor_de   = _cor_status(ev["de"])
+                                cor_para = _cor_status(ev["para"])
+                                cards_h.append(
+                                    f'<div style="background:white;border-radius:8px;padding:12px 16px;'
+                                    f'margin-bottom:8px;border-left:3px solid #0052CC;'
+                                    f'box-shadow:0 1px 4px rgba(0,0,0,0.06)">'
+                                    f'<div style="display:flex;justify-content:space-between;'
+                                    f'align-items:center;flex-wrap:wrap;gap:6px">'
+                                    f'<div>'
+                                    f'<a href="https://cesar-projetos4.atlassian.net/browse/{ev["issue"]}" '
+                                    f'target="_blank" style="font-weight:700;color:#0052CC;'
+                                    f'font-size:0.88rem;text-decoration:none">{ev["issue"]}</a>'
+                                    f'&nbsp;&nbsp;{_badge(ev["de"], cor_de)} '
+                                    f'<span style="color:#6B778C;font-size:0.9rem">→</span> '
+                                    f'{_badge(ev["para"], cor_para)}'
+                                    f'</div>'
+                                    f'<span style="font-size:0.75rem;color:#6B778C">'
+                                    f'🕒 {data_fmt} &nbsp;·&nbsp; 👤 {ev["autor"]}</span>'
+                                    f'</div>'
+                                    f'<p style="margin:5px 0 0;font-size:0.85rem;color:#172B4D">'
+                                    f'{ev["resumo"]}</p>'
+                                    f'</div>'
+                                )
+                            st.markdown("".join(cards_h), unsafe_allow_html=True)
 
 
 # ── PONTO DE ENTRADA ──────────────────────────────────────────
