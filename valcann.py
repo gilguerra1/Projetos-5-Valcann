@@ -323,6 +323,97 @@ def _buscar_vencendo_em_breve():
     return [item.get("issue", item) for item in issues]
 
 
+@st.cache_data(ttl=600)
+def _buscar_gestores():
+    """Retorna mapeamento project_key → {name, lead} via /rest/api/3/project."""
+    url      = f"https://{DOMAIN}.atlassian.net/rest/api/3/project"
+    response = requests.get(url, auth=AUTH, headers=HEADERS, timeout=15)
+    response.raise_for_status()
+    return {
+        p["key"]: {
+            "name": p.get("name", p["key"]),
+            "lead": (p.get("lead") or {}).get("displayName", "Sem gestor"),
+        }
+        for p in response.json()
+    }
+
+
+@st.cache_data(ttl=600)
+def _buscar_por_lider():
+    """Busca todas as issues para a aba Por Gestor (inclui project.key para lookup do lead)."""
+    todas           = []
+    next_page_token = None
+    while True:
+        body = {
+            "jql": "issuetype = Epic ORDER BY project ASC",
+            "fields": ["summary", "status", "assignee", "priority",
+                       "issuetype", "project", "duedate", "updated"],
+            "maxResults": 100,
+        }
+        if next_page_token:
+            body["nextPageToken"] = next_page_token
+        response = requests.post(URL, data=json.dumps(body), auth=AUTH, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        dados = response.json()
+        raw   = dados.get("results") or dados.get("issues", [])
+        todas.extend([item.get("issue", item) for item in raw])
+        next_page_token = dados.get("nextPageToken")
+        if not next_page_token:
+            break
+    return todas
+
+
+@st.cache_data(ttl=600)
+def _buscar_tasks_epics():
+    """Busca todas as tasks/stories filhas de Epics (classic: customfield_10014; next-gen: parent)."""
+    todas           = []
+    next_page_token = None
+    while True:
+        body = {
+            "jql": "issuetype not in (Epic, Sub-task) ORDER BY project ASC",
+            "fields": ["summary", "status", "assignee", "priority",
+                       "issuetype", "project", "duedate", "updated",
+                       "parent", "customfield_10014"],
+            "maxResults": 100,
+        }
+        if next_page_token:
+            body["nextPageToken"] = next_page_token
+        response = requests.post(URL, data=json.dumps(body), auth=AUTH, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        dados = response.json()
+        raw   = dados.get("results") or dados.get("issues", [])
+        todas.extend([item.get("issue", item) for item in raw])
+        next_page_token = dados.get("nextPageToken")
+        if not next_page_token:
+            break
+    return todas
+
+
+@st.cache_data(ttl=600)
+def _buscar_subtasks():
+    """Busca todas as sub-tarefas com o campo parent para agrupar por história."""
+    todas           = []
+    next_page_token = None
+    while True:
+        body = {
+            "jql": "issuetype in subTaskIssueTypes() ORDER BY parent ASC",
+            "fields": ["summary", "status", "assignee", "priority",
+                       "issuetype", "project", "duedate", "updated", "parent"],
+            "maxResults": 100,
+        }
+        if next_page_token:
+            body["nextPageToken"] = next_page_token
+        response = requests.post(URL, data=json.dumps(body), auth=AUTH, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        dados = response.json()
+        raw   = dados.get("results") or dados.get("issues", [])
+        todas.extend([item.get("issue", item) for item in raw])
+        next_page_token = dados.get("nextPageToken")
+        if not next_page_token:
+            break
+    return todas
+
+
 # --- Helpers visuais ---
 
 def _dias_restantes(duedate_str: str) -> int:
@@ -456,7 +547,7 @@ def dashboard():
         st.markdown(
             "📊 **KPIs** &nbsp;|&nbsp; 🔄 **Atividade**  \n"
             "🚩 **Impedimentos** &nbsp;|&nbsp; 📈 **Progresso**  \n"
-            "⏰ **Prazos**"
+            "⏰ **Prazos** &nbsp;|&nbsp; 👤 **Por Responsável**"
         )
         st.markdown("---")
         st.markdown(f"**Domínio:** `{DOMAIN}`")
@@ -478,6 +569,10 @@ def dashboard():
     flagged      = []
     urgentes     = []
     todas_issues = []
+    issues_lider = []
+    gestores_map  = {}
+    tasks_epics   = []
+    subtasks      = []
 
     try:
         with st.spinner("Carregando dados do Jira..."):
@@ -486,15 +581,26 @@ def dashboard():
                 ("flagged",    _buscar_flagged_dash),
                 ("urgentes",   _buscar_vencendo_em_breve),
                 ("progresso",  _buscar_progresso_dash),
+                ("lider",       _buscar_por_lider),
+                ("tasks_epics", _buscar_tasks_epics),
+                ("subtasks",    _buscar_subtasks),
             ]:
                 try:
                     resultado = fn()
                     if nome == "atividade":  atualizadas  = resultado
                     elif nome == "flagged":  flagged      = resultado
                     elif nome == "urgentes": urgentes     = resultado
+                    elif nome == "lider":    issues_lider = resultado
+                    elif nome == "tasks_epics": tasks_epics = resultado
+                    elif nome == "subtasks":    subtasks    = resultado
                     else:                   todas_issues = resultado
                 except Exception as e:
                     erros[nome] = str(e)
+        # Busca gestores separadamente (retorna dict)
+        try:
+            gestores_map = _buscar_gestores()
+        except Exception as e:
+            erros["gestores"] = str(e)
     except Exception as e:
         st.error(f"Erro crítico ao carregar dados: {e}")
         st.exception(e)
@@ -538,11 +644,12 @@ def dashboard():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── Tabs ────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🔄 Atividade Recente",
         "🚩 Impedimentos",
         "📈 Progresso por Projeto",
         "⏰ Prazos Próximos",
+        "👤 Por Responsável",
     ])
 
     # ─ Tab 1: Atividade Recente ─────────────────────────────────
@@ -726,6 +833,195 @@ def dashboard():
                     f'</div></div>'
                 )
             st.markdown("".join(cards), unsafe_allow_html=True)
+
+    # ─ Tab 5: Por Responsável (Epics + Tasks filhas) ──────────────
+    with tab5:
+        if not issues_lider:
+            st.info("Sem dados de assignees disponíveis.")
+        else:
+            def _cat_issue(issue):
+                k = issue.get("fields", {}).get("status", {}).get("statusCategory", {}).get("key", "todo")
+                return CATEGORIAS.get(k, "A Fazer")
+
+            # epic_key → [tasks/stories]
+            epic_to_tasks = {}
+            for task in tasks_epics:
+                flds     = task.get("fields", {})
+                epic_key = flds.get("customfield_10014") or (flds.get("parent") or {}).get("key")
+                if epic_key:
+                    epic_to_tasks.setdefault(epic_key, []).append(task)
+
+            # story_key → [subtasks]
+            story_to_subtasks = {}
+            for st_issue in subtasks:
+                parent_key = (st_issue.get("fields", {}).get("parent") or {}).get("key")
+                if parent_key:
+                    story_to_subtasks.setdefault(parent_key, []).append(st_issue)
+
+            # Coleta assignees únicos dos Epics
+            assignees = sorted({
+                (i.get("fields", {}).get("assignee") or {}).get("displayName", "Não atribuído")
+                for i in issues_lider
+            })
+
+            col_sel, _ = st.columns([1, 3])
+            with col_sel:
+                assignee_sel = st.selectbox(
+                    "👤 Responsável",
+                    ["Todos"] + assignees,
+                    help="Selecione um responsável para ver seus Epics e tasks",
+                )
+
+            # Filtra Epics pelo assignee selecionado
+            if assignee_sel == "Todos":
+                epics_a = issues_lider
+            else:
+                epics_a = [
+                    i for i in issues_lider
+                    if (i.get("fields", {}).get("assignee") or {}).get("displayName") == assignee_sel
+                ]
+
+            # KPIs baseados nos Epics filtrados
+            total_epics = len(epics_a)
+            conc_epics  = sum(1 for i in epics_a if _cat_issue(i) == "Concluído")
+            and_epics   = sum(1 for i in epics_a if _cat_issue(i) == "Em Andamento")
+            # Total de tasks filhas dos epics filtrados
+            total_tasks = sum(len(epic_to_tasks.get(i.get("key", ""), [])) for i in epics_a)
+            pct_epics   = round((conc_epics / total_epics * 100) if total_epics else 0, 1)
+
+            c1a, c2a, c3a, c4a = st.columns(4)
+            for col_a, val_a, lbl_a, cor_a in [
+                (c1a, total_epics,    "🗂️ Epics",              "#6554C0"),
+                (c2a, total_tasks,    "📋 Tasks Associadas",   "#0052CC"),
+                (c3a, conc_epics,     "✅ Epics Concluídos",   "#00875A"),
+                (c4a, f"{pct_epics}%","📈 % Epics Concluídos", "#00875A"),
+            ]:
+                with col_a:
+                    st.markdown(
+                        f'<div class="kpi-card" style="border-top:4px solid {cor_a}">'
+                        f'<div class="kpi-val" style="color:{cor_a}">{val_a}</div>'
+                        f'<div class="kpi-lbl">{lbl_a}</div></div>',
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # Filtra adicionais
+            col_fp, col_fs = st.columns(2)
+            projs_e = sorted({i.get("fields", {}).get("project", {}).get("name", "—") for i in epics_a})
+            stats_e = sorted({i.get("fields", {}).get("status", {}).get("name", "—") for i in epics_a})
+            fil_proj_e   = col_fp.multiselect("Filtrar por Projeto", projs_e, placeholder="Todos", key="e_proj")
+            fil_status_e = col_fs.multiselect("Filtrar por Status",  stats_e, placeholder="Todos", key="e_status")
+
+            epics_filtrados = [
+                i for i in epics_a
+                if (not fil_proj_e   or i.get("fields", {}).get("project", {}).get("name") in fil_proj_e)
+                and (not fil_status_e or i.get("fields", {}).get("status",  {}).get("name") in fil_status_e)
+            ]
+
+            st.caption(f"Exibindo {len(epics_filtrados)} Epics")
+            st.markdown("---")
+
+            # Epics agrupados por projeto, com expanders mostrando tasks filhas
+            por_projeto_e = {}
+            for epic in epics_filtrados:
+                pnome = epic.get("fields", {}).get("project", {}).get("name", "Desconhecido")
+                por_projeto_e.setdefault(pnome, []).append(epic)
+
+            for proj_nome in sorted(por_projeto_e.keys()):
+                st.markdown(f"#### 📁 {proj_nome}")
+                for epic in por_projeto_e[proj_nome]:
+                    efields   = epic.get("fields", {})
+                    ekey      = epic.get("key", "—")
+                    esummary  = efields.get("summary", "Sem título")
+                    estatus   = efields.get("status", {}).get("name", "—")
+                    epriority = (efields.get("priority") or {}).get("name", "—")
+                    eassignee = (efields.get("assignee") or {}).get("displayName", "Não atribuído")
+                    cor_s_e   = _cor_status(estatus)
+                    cor_p_e   = _cor_prioridade(epriority)
+                    tasks_do_epic = epic_to_tasks.get(ekey, [])
+                    n_tasks   = len(tasks_do_epic)
+                    n_conc    = sum(1 for t in tasks_do_epic if _cat_issue(t) == "Concluído")
+                    n_and     = sum(1 for t in tasks_do_epic if _cat_issue(t) == "Em Andamento")
+                    pct_e     = round((n_conc / n_tasks * 100) if n_tasks else 0, 1)
+
+                    label_exp = (
+                        f"📌 [{ekey}] {esummary}  ·  "
+                        f"{estatus}  ·  {n_tasks} tasks  ·  {pct_e}% concluído"
+                    )
+                    with st.expander(label_exp, expanded=False):
+                        # Cabeçalho do Epic
+                        st.markdown(
+                            f'{_badge(estatus, cor_s_e)}{_badge(epriority, cor_p_e)}'
+                            f'&nbsp;<span style="font-size:0.82rem;color:#6B778C">👤 {eassignee}</span>'
+                            f'&nbsp;&nbsp;<a href="https://cesar-projetos4.atlassian.net/browse/{ekey}" '
+                            f'target="_blank" style="font-size:0.82rem;color:#0052CC">🔗 Abrir no Jira</a>',
+                            unsafe_allow_html=True,
+                        )
+
+                        if n_tasks > 0:
+                            # Barra de progresso do Epic
+                            pct_af_e = round(((n_tasks - n_conc - n_and) / n_tasks * 100), 1)
+                            pct_em_e = round((n_and / n_tasks * 100), 1)
+                            pct_co_e = round((n_conc / n_tasks * 100), 1)
+                            st.markdown(
+                                f'<div style="display:flex;height:10px;border-radius:6px;overflow:hidden;'
+                                f'background:#F4F5F7;margin:8px 0 12px">'
+                                f'<div style="width:{pct_co_e}%;background:#00875A"></div>'
+                                f'<div style="width:{pct_em_e}%;background:#0052CC"></div>'
+                                f'<div style="width:{pct_af_e}%;background:#DFE1E6"></div>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+                            # Cada história/task com suas sub-tarefas aninhadas
+                            for task in tasks_do_epic:
+                                tkey     = task.get("key", "—")
+                                tfields  = task.get("fields", {})
+                                tsummary = tfields.get("summary", "Sem título")
+                                tstatus  = tfields.get("status", {}).get("name", "—")
+                                ttype    = (tfields.get("issuetype") or {}).get("name", "—")
+                                tassign  = (tfields.get("assignee") or {}).get("displayName", "Não atribuído")
+                                tprio    = (tfields.get("priority") or {}).get("name", "—")
+                                cor_st   = _cor_status(tstatus)
+                                cor_pt   = _cor_prioridade(tprio)
+                                subs     = story_to_subtasks.get(tkey, [])
+
+                                # Card da história
+                                st.markdown(_card_issue(task), unsafe_allow_html=True)
+
+                                # Sub-tarefas aninhadas
+                                if subs:
+                                    sub_html = []
+                                    for sub in subs:
+                                        sk     = sub.get("key", "—")
+                                        sf     = sub.get("fields", {})
+                                        ss_nam = sf.get("summary", "—")
+                                        ss_st  = sf.get("status", {}).get("name", "—")
+                                        ss_as  = (sf.get("assignee") or {}).get("displayName", "Não atribuído")
+                                        ss_pr  = (sf.get("priority") or {}).get("name", "—")
+                                        cor_ss = _cor_status(ss_st)
+                                        cor_ps = _cor_prioridade(ss_pr)
+                                        sub_html.append(
+                                            f'<div style="margin:0 0 6px 24px;background:#F8F9FA;'
+                                            f'border-radius:6px;padding:8px 12px;'
+                                            f'border-left:3px solid {cor_ss}">'
+                                            f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+                                            f'<span style="font-size:0.75rem;color:#6B778C">↳</span>'
+                                            f'<a href="https://cesar-projetos4.atlassian.net/browse/{sk}" '
+                                            f'target="_blank" style="font-weight:700;color:#0052CC;'
+                                            f'font-size:0.82rem;text-decoration:none">{sk}</a>'
+                                            f'{_badge(ss_st, cor_ss)}{_badge(ss_pr, cor_ps)}'
+                                            f'</div>'
+                                            f'<p style="margin:4px 0 2px 18px;font-size:0.85rem;color:#172B4D">'
+                                            f'{ss_nam}</p>'
+                                            f'<span style="margin-left:18px;font-size:0.75rem;color:#6B778C">'
+                                            f'👤 {ss_as}</span>'
+                                            f'</div>'
+                                        )
+                                    st.markdown("".join(sub_html), unsafe_allow_html=True)
+                        else:
+                            st.info("Nenhuma task associada a este Epic.")
+
 
 
 # ── PONTO DE ENTRADA ──────────────────────────────────────────
