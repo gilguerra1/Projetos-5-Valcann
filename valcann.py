@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import requests
 import streamlit as st
+import streamlit.components.v1 as _st_components
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -580,6 +581,60 @@ def _card_issue(issue: dict, show_flag: bool = False) -> str:
     )
 
 
+# ── Helpers de gráficos HTML (sem dependências externas) ──────
+
+def _html_hbar(titulo: str, dados: dict, cores: dict, icone: str = "") -> str:
+    """Barras horizontais proporcionais em HTML puro."""
+    maximo = max(dados.values()) if dados else 1
+    linhas = "".join(
+        f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
+        f'<span style="min-width:160px;font-size:0.82rem;color:#172B4D;font-weight:600;'
+        f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="{k}">{k}</span>'
+        f'<div style="flex:1;height:20px;background:#F0F2F8;border-radius:6px;overflow:hidden">'
+        f'<div style="width:{round(v/maximo*100)}%;height:100%;'
+        f'background:{cores.get(k,"#4C6EF5")};border-radius:6px"></div>'
+        f'</div>'
+        f'<span style="min-width:28px;text-align:right;font-size:0.82rem;'
+        f'font-weight:700;color:{cores.get(k,"#4C6EF5")}">{v}</span>'
+        f'</div>'
+        for k, v in sorted(dados.items(), key=lambda x: -x[1])
+    )
+    return (
+        f'<div style="background:white;border-radius:12px;padding:16px 20px;'
+        f'box-shadow:0 1px 6px rgba(0,0,0,0.07);margin-bottom:16px">'
+        f'<div style="font-weight:700;color:#172B4D;font-size:0.92rem;margin-bottom:14px">'
+        f'{icone} {titulo}</div>{linhas}</div>'
+    )
+
+
+def _html_segbar(titulo: str, dados: dict, cores: dict, icone: str = "") -> str:
+    """Barra segmentada colorida (substituto de gráfico de pizza) em HTML puro."""
+    total_s = sum(dados.values()) or 1
+    segs = "".join(
+        f'<div style="width:{round(v/total_s*100)}%;background:{cores.get(k,"#ADB5BD")};'
+        f'display:flex;align-items:center;justify-content:center;color:white;'
+        f'font-size:0.72rem;font-weight:700;overflow:hidden;white-space:nowrap" title="{k}: {v}">'
+        f'{"{:.0f}".format(v/total_s*100)+"%" if round(v/total_s*100) >= 8 else ""}'
+        f'</div>'
+        for k, v in sorted(dados.items(), key=lambda x: -x[1])
+    )
+    legenda = " ".join(
+        f'<span style="font-size:0.75rem;color:#6B778C">'
+        f'<span style="color:{cores.get(k,"#ADB5BD")}">█</span> {k} ({v})</span>'
+        for k, v in sorted(dados.items(), key=lambda x: -x[1])
+    )
+    return (
+        f'<div style="background:white;border-radius:12px;padding:16px 20px;'
+        f'box-shadow:0 1px 6px rgba(0,0,0,0.07);margin-bottom:16px">'
+        f'<div style="font-weight:700;color:#172B4D;font-size:0.92rem;margin-bottom:12px">'
+        f'{icone} {titulo}</div>'
+        f'<div style="display:flex;height:36px;border-radius:8px;overflow:hidden;'
+        f'background:#F0F2F8">{segs}</div>'
+        f'<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:10px">{legenda}</div>'
+        f'</div>'
+    )
+
+
 def dashboard():
     """Dashboard Streamlit dinâmico — Valcann Jira."""
     st.set_page_config(page_title="Valcann · Jira", page_icon="🚀", layout="wide")
@@ -811,15 +866,17 @@ def dashboard():
     # ── Calcula progresso ───────────────────────────────────────
     projetos_data   = {}
     for issue in todas_issues:
-        fields  = issue.get("fields", {})
-        proj    = fields.get("project", {}).get("name", "Desconhecido")
-        cat_raw = fields.get("status", {}).get("statusCategory", {}).get("key", "todo")
-        cat     = CATEGORIAS.get(cat_raw, "A Fazer")  # categorias desconhecidas → A Fazer
+        fields   = issue.get("fields", {})
+        proj_f   = fields.get("project", {})
+        proj     = proj_f.get("name", "Desconhecido")
+        proj_key = proj_f.get("key", "")
+        cat_raw  = fields.get("status", {}).get("statusCategory", {}).get("key", "todo")
+        cat      = CATEGORIAS.get(cat_raw, "A Fazer")  # categorias desconhecidas → A Fazer
         if proj not in projetos_data:
-            projetos_data[proj] = {"A Fazer": 0, "Em Andamento": 0, "Concluído": 0}
+            projetos_data[proj] = {"A Fazer": 0, "Em Andamento": 0, "Concluído": 0, "_key": proj_key}
         projetos_data[proj][cat] += 1
 
-    total_geral     = sum(sum(c.values()) for c in projetos_data.values())
+    total_geral     = sum(sum(v for k, v in c.items() if k != "_key") for c in projetos_data.values())
     concluido_geral = sum(c.get("Concluído", 0) for c in projetos_data.values())
     pct_geral       = round((concluido_geral / total_geral * 100) if total_geral else 0, 1)
     total_epicos    = sum(
@@ -877,6 +934,37 @@ def dashboard():
 
         # ── Sub-aba 1: Progresso por Projeto ─────────────────────
         with sub1:
+            # Inicia session_state para navegação
+            if "goto_tab3" not in st.session_state:
+                st.session_state.goto_tab3 = False
+
+            # Navega para aba Detalhes do Projeto via JS (components.html executa de verdade)
+            if st.session_state.goto_tab3:
+                st.session_state.goto_tab3 = False
+                _st_components.html(
+                    """
+                    <script>
+                    (function(){
+                        function tryClick(){
+                            var tabs = window.parent.document.querySelectorAll('button[role="tab"]');
+                            for(var i=0;i<tabs.length;i++){
+                                if(tabs[i].innerText.indexOf('Detalhes') !== -1){
+                                    tabs[i].click(); return;
+                                }
+                            }
+                        }
+                        setTimeout(tryClick, 100);
+                        setTimeout(tryClick, 300);
+                        setTimeout(tryClick, 600);
+                    })();
+                    </script>
+                    """,
+                    height=0,
+                )
+
+            # ──────────────────────────────────────────────────────
+            # VISTA DE LISTA
+            # ──────────────────────────────────────────────────────
             if not projetos_data:
                 st.info("Sem dados de progresso disponíveis.")
             else:
@@ -898,49 +986,87 @@ def dashboard():
                     unsafe_allow_html=True,
                 )
 
+                st.caption("💡 Clique em um projeto para ver detalhes e gráficos")
+
+                # CSS: botão fica invisível e sobrepõe o card anterior via seletor irmão
+                st.markdown("""
+                <style>
+                .proj-card + div[data-testid="stButton"] {
+                    margin-top: -5.8rem !important;
+                    height: 5.4rem !important;
+                    overflow: hidden;
+                    position: relative;
+                }
+                .proj-card + div[data-testid="stButton"] > button {
+                    position: absolute !important;
+                    top: 0 !important; left: 0 !important;
+                    width: 100% !important; height: 100% !important;
+                    opacity: 0 !important;
+                    cursor: pointer !important;
+                    z-index: 100 !important;
+                    background: transparent !important;
+                    border: none !important;
+                    box-shadow: none !important;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+
                 proj_ordenados = sorted(
                     projetos_data.items(),
-                    key=lambda x: -(x[1].get("Concluído", 0) / max(sum(x[1].values()), 1)),
+                    key=lambda x: -(x[1].get("Concluído", 0) / max(
+                        sum(v for k, v in x[1].items() if k != "_key"), 1)),
                 )
-                barras = []
-                for nome, cnts in proj_ordenados:
-                    a_fazer      = cnts.get("A Fazer", 0)
-                    em_andamento = cnts.get("Em Andamento", 0)
-                    concluido    = cnts.get("Concluído", 0)
-                    total        = a_fazer + em_andamento + concluido
-                    pct          = round((concluido / total * 100) if total else 0, 1)
-                    pct_af       = round((a_fazer      / total * 100) if total else 0, 1)
-                    pct_em       = round((em_andamento / total * 100) if total else 0, 1)
-                    pct_co       = round((concluido    / total * 100) if total else 0, 1)
-                    cor_pct      = "#2F9E44" if pct >= 75 else "#E67700" if pct >= 40 else "#E03131"
-                    barras.append(
+                for _nome, _cnts in proj_ordenados:
+                    _pkey   = _cnts.get("_key", "")
+                    _af     = _cnts.get("A Fazer", 0)
+                    _em     = _cnts.get("Em Andamento", 0)
+                    _co     = _cnts.get("Concluído", 0)
+                    _tot    = _af + _em + _co
+                    _pct    = round((_co / _tot * 100) if _tot else 0, 1)
+                    _pct_af = round((_af / _tot * 100) if _tot else 0, 1)
+                    _pct_em = round((_em / _tot * 100) if _tot else 0, 1)
+                    _pct_co = round((_co / _tot * 100) if _tot else 0, 1)
+                    _cor    = "#2F9E44" if _pct >= 75 else "#E67700" if _pct >= 40 else "#E03131"
+                    _bg     = "#EBFBEE" if _pct >= 75 else "#FFF9DB" if _pct >= 40 else "#FFF5F5"
+
+                    # Card HTML (renderizado ANTES do botão — botão sobreposto via CSS)
+                    st.markdown(
                         f'<div class="proj-card">'
                         f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'
-                        f'<span style="font-weight:700;color:#1A1D2E;font-size:0.95rem">{nome}</span>'
+                        f'<span style="font-weight:700;color:#1A1D2E;font-size:0.95rem">{_nome}</span>'
                         f'<div style="display:flex;align-items:center;gap:16px">'
                         f'<span style="font-size:0.75rem;color:#ADB5BD">'
-                        f'<span style="color:#E8EAED;font-weight:700">{a_fazer}</span> a fazer &nbsp;·&nbsp; '
-                        f'<span style="color:#4C6EF5;font-weight:700">{em_andamento}</span> em andamento &nbsp;·&nbsp; '
-                        f'<span style="color:#2F9E44;font-weight:700">{concluido}</span> concluído'
+                        f'<span style="color:#6554C0;font-weight:700">{_af}</span> a fazer &nbsp;·&nbsp; '
+                        f'<span style="color:#4C6EF5;font-weight:700">{_em}</span> em andamento &nbsp;·&nbsp; '
+                        f'<span style="color:#2F9E44;font-weight:700">{_co}</span> concluído'
                         f'</span>'
-                        f'<span style="font-size:0.9rem;font-weight:900;color:{cor_pct};'
-                        f'background:{"#EBFBEE" if pct >= 75 else "#FFF9DB" if pct >= 40 else "#FFF5F5"};'
-                        f'padding:2px 10px;border-radius:20px">{pct}%</span>'
+                        f'<span style="font-size:0.9rem;font-weight:900;color:{_cor};'
+                        f'background:{_bg};padding:2px 10px;border-radius:20px">{_pct}%</span>'
                         f'</div></div>'
                         f'<div style="height:8px;border-radius:20px;overflow:hidden;background:#F0F2F8;display:flex">'
-                        f'<div style="width:{pct_co}%;background:linear-gradient(90deg,#2F9E44,#40C057)" title="Concluído"></div>'
-                        f'<div style="width:{pct_em}%;background:linear-gradient(90deg,#4C6EF5,#748FFC)" title="Em Andamento"></div>'
-                        f'<div style="width:{pct_af}%;background:#E8EAED" title="A Fazer"></div>'
+                        f'<div style="width:{_pct_co}%;background:linear-gradient(90deg,#2F9E44,#40C057)"></div>'
+                        f'<div style="width:{_pct_em}%;background:linear-gradient(90deg,#4C6EF5,#748FFC)"></div>'
+                        f'<div style="width:{_pct_af}%;background:#E8EAED"></div>'
                         f'</div>'
-                        f'</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
                     )
-                st.markdown("".join(barras), unsafe_allow_html=True)
+                    # Botão invisível sobreposto ao card via CSS sibling selector
+                    if st.button(
+                        _nome,
+                        key=f"dp_{_nome}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["proj_searchbox"] = _nome
+                        st.session_state.goto_tab3 = True
+                        st.rerun()
+
                 st.markdown(
                     '<div style="display:flex;gap:20px;font-size:0.75rem;color:#ADB5BD;margin-top:8px;'
                     'font-weight:600;text-transform:uppercase;letter-spacing:0.06em">'
                     '<span><span style="color:#2F9E44">■</span> Concluído</span>'
                     '<span><span style="color:#4C6EF5">■</span> Em Andamento</span>'
-                    '<span><span style="color:#E8EAED">■</span> A Fazer</span>'
+                    '<span><span style="color:#6554C0">■</span> A Fazer</span>'
                     '</div>',
                     unsafe_allow_html=True,
                 )
@@ -1376,11 +1502,16 @@ def dashboard():
                 hoje_det   = date.today()
                 limite_det = hoje_det + timedelta(days=5)
                 n_af = n_em = n_co = n_imp = n_prazo = 0
+                t3_tipo_cnt: dict     = {}
+                t3_assignee_cnt: dict = {}
+                t3_priority_cnt: dict = {}
+                t3_status_cnt: dict   = {}
 
                 for issue in issues_proj_det:
                     fields  = issue.get("fields", {})
                     cat_raw = fields.get("status", {}).get("statusCategory", {}).get("key", "todo")
                     cat     = CATEGORIAS.get(cat_raw, "A Fazer")
+                    st_name = fields.get("status", {}).get("name", "—")
                     if cat == "A Fazer":        n_af  += 1
                     elif cat == "Em Andamento": n_em  += 1
                     elif cat == "Concluído":    n_co  += 1
@@ -1393,6 +1524,13 @@ def dashboard():
                                 n_prazo += 1
                         except Exception:
                             pass
+                    _t  = (fields.get("issuetype") or {}).get("name", "—")
+                    _a  = (fields.get("assignee") or {}).get("displayName", "Não atribuído")
+                    _p  = (fields.get("priority") or {}).get("name", "—")
+                    t3_tipo_cnt[_t]     = t3_tipo_cnt.get(_t, 0) + 1
+                    t3_assignee_cnt[_a] = t3_assignee_cnt.get(_a, 0) + 1
+                    t3_priority_cnt[_p] = t3_priority_cnt.get(_p, 0) + 1
+                    t3_status_cnt[st_name] = t3_status_cnt.get(st_name, 0) + 1
 
                 total_det = len(issues_proj_det)
                 pct_det   = round((n_co / total_det * 100) if total_det else 0, 1)
@@ -1459,6 +1597,54 @@ def dashboard():
                         f'<span><span style="color:#0052CC">█</span> Em Andamento ({pct_em_d}%)</span>'
                         f'<span><span style="color:#6554C0">█</span> A Fazer ({pct_af_d}%)</span>'
                         f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # ── Gráficos ──────────────────────────────────────────
+                    T3_CORES_CAT  = {"A Fazer": "#6554C0", "Em Andamento": "#0052CC", "Concluído": "#00875A"}
+                    T3_CORES_PRIO = {"Highest": "#BF2600", "High": "#FF5630", "Medium": "#FF991F",
+                                     "Low": "#0065FF", "Lowest": "#6554C0"}
+                    T3_CORES_TIPO = {k: c for k, c in zip(
+                        sorted(t3_tipo_cnt),
+                        ["#4C6EF5","#2F9E44","#E67700","#C92A2A","#6554C0","#00B8D9","#172B4D","#36B37E"],
+                    )}
+                    T3_CORES_ASS = {k: c for k, c in zip(
+                        sorted(t3_assignee_cnt, key=lambda a: -t3_assignee_cnt[a]),
+                        ["#4C6EF5","#2F9E44","#E67700","#C92A2A","#6554C0","#00B8D9",
+                         "#172B4D","#36B37E","#FF5630","#0052CC","#BF2600","#00875A"],
+                    )}
+
+                    gc_t3a, gc_t3b = st.columns(2)
+                    with gc_t3a:
+                        st.markdown(
+                            _html_segbar(
+                                "Distribuição por Categoria",
+                                {"A Fazer": n_af, "Em Andamento": n_em, "Concluído": n_co},
+                                T3_CORES_CAT, "🥧",
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    with gc_t3b:
+                        st.markdown(
+                            _html_hbar("Issues por Prioridade", t3_priority_cnt, T3_CORES_PRIO, "📊"),
+                            unsafe_allow_html=True,
+                        )
+
+                    gc_t3c, gc_t3d = st.columns(2)
+                    with gc_t3c:
+                        st.markdown(
+                            _html_hbar("Issues por Tipo", t3_tipo_cnt, T3_CORES_TIPO, "🏷️"),
+                            unsafe_allow_html=True,
+                        )
+                    with gc_t3d:
+                        st.markdown(
+                            _html_segbar("Status Detalhado", t3_status_cnt,
+                                         {k: _cor_status(k) for k in t3_status_cnt}, "📋"),
+                            unsafe_allow_html=True,
+                        )
+
+                    st.markdown(
+                        _html_hbar("Issues por Responsável", t3_assignee_cnt, T3_CORES_ASS, "👤"),
                         unsafe_allow_html=True,
                     )
 
